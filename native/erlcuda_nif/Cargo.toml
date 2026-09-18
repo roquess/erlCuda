@@ -17,11 +17,6 @@ bench = []
 [dependencies]
 rustler = "0.38"
 cust = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5" }
-# Never imported directly in src/ — `cust` already pulls this in transitively.
-# Listed as a direct dependency purely to pin its feature set to `["driver"]`
-# (no default features), instead of whatever `cust`'s own transitive request
-# would otherwise resolve to.
-cust_raw = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5", default-features = false, features = ["driver"] }
 
 [build-dependencies]
 cuda_builder = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5", default-features = false }
