@@ -29,8 +29,8 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 +-------------------------------------------------------------+
 |                      Elixir / Erlang app                    |
 |                                                               |
-|   ErlCuda.launch(kernel, args)  ->  {:ok, ref}               |
-|   receive do {:erlcuda, ^ref, {:ok, result}} -> ... end       |
+|   ErlCuda.launch(kernel, args)  ->  {:ok, job_id}            |
+|   receive do {:erlcuda, ^job_id, {:ok, result}} -> ... end    |
 +-------------------------------|------------------------------+
                                 | NIF call (non-blocking)
                                 v
@@ -39,7 +39,7 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 |                                                               |
 |  - validates args, encodes job                               |
 |  - pushes job onto a channel to the GPU worker                |
-|  - returns {:ok, ref} to BEAM immediately                     |
+|  - returns {:ok, job_id} to BEAM immediately                  |
 +-------------------------------|------------------------------+
                                 | mpsc channel
                                 v
@@ -49,7 +49,8 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 |  - owns the single CUDA context for this process              |
 |  - loads compiled kernel modules (PTX)                        |
 |  - launches kernel, (optionally streams / async copies)       |
-|  - on completion: enif_send(env, pid, {:erlcuda, ref, result}) |
+|  - on completion: OwnedEnv::send_and_clear(pid, {:erlcuda,     |
+|    job_id, result})                                            |
 +-------------------------------|------------------------------+
                                 | cust / cudarc host API
                                 v
