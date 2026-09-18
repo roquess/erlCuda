@@ -43,16 +43,26 @@ pub fn sender(device: u32) -> Sender<Job> {
 /// `MutexGuard` on `table` is alive, so it can never poison `table` for
 /// other, unrelated devices. The accepted trade-off is a narrow, harmless
 /// race: two concurrent first-time calls for the *same* device can each
-/// spawn a worker thread, with only one kept in the map — the other's
-/// `Sender` is simply dropped, leaving an idle worker thread that never
-/// receives any job and eventually just sits blocked forever, which wastes
-/// one thread but causes no crash or incorrect behavior.
-fn get_or_spawn<B, F>(table: &Mutex<HashMap<u32, Sender<Job>>>, device: u32, make_backend: F) -> Sender<Job>
+/// spawn a worker thread, with only one kept in the map — the loser's
+/// `Sender` is dropped immediately without ever being cloned or handed to a
+/// caller, so its channel disconnects right away and that thread's
+/// `for job in rx` loop exits almost immediately after briefly constructing
+/// (and then dropping) its own backend. It never lingers; the cost is a
+/// moment of wasted setup, not a leaked thread.
+fn get_or_spawn<B, F>(
+    table: &Mutex<HashMap<u32, Sender<Job>>>,
+    device: u32,
+    make_backend: F,
+) -> Sender<Job>
 where
     B: Backend,
     F: FnOnce() -> B + Send + 'static,
 {
-    if let Some(sender) = table.lock().expect("erlcuda WORKERS mutex poisoned").get(&device) {
+    if let Some(sender) = table
+        .lock()
+        .expect("erlcuda WORKERS mutex poisoned")
+        .get(&device)
+    {
         return sender.clone();
     }
 
@@ -88,7 +98,11 @@ where
     F: FnOnce() -> B + Send + 'static,
     S: Fn(&LocalPid, u64, Result<Vec<f32>, String>) + Send + 'static,
 {
-    if let Some(sender) = table.lock().expect("erlcuda WORKERS mutex poisoned").get(&device) {
+    if let Some(sender) = table
+        .lock()
+        .expect("erlcuda WORKERS mutex poisoned")
+        .get(&device)
+    {
         return sender.clone();
     }
 
@@ -140,6 +154,28 @@ thread_local! {
     /// `None` (the default) leaves the builder's normal default stack size
     /// untouched, so production code and every other test are unaffected.
     static TEST_STACK_SIZE_OVERRIDE: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+}
+
+/// Sets `TEST_STACK_SIZE_OVERRIDE` for the lifetime of this guard, resetting
+/// it to `None` on drop — including if a panic unwinds through the scope
+/// holding it — so a test using this can't leave the override set for
+/// whichever test the harness runs next on the same OS thread.
+#[cfg(test)]
+struct StackSizeOverrideGuard;
+
+#[cfg(test)]
+impl StackSizeOverrideGuard {
+    fn set(size: usize) -> Self {
+        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(Some(size)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for StackSizeOverrideGuard {
+    fn drop(&mut self) {
+        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(None));
+    }
 }
 
 /// Spawns the worker thread, draining `Job`s from a fresh channel and
@@ -453,8 +489,12 @@ mod tests {
 
         // Cache device 0 successfully first.
         let calls_0 = Arc::new(Mutex::new(Vec::new()));
-        let sender_0 =
-            get_or_spawn_with_sink(table, 0, move || RecordingBackend { calls: calls_0 }, noop_sink);
+        let sender_0 = get_or_spawn_with_sink(
+            table,
+            0,
+            move || RecordingBackend { calls: calls_0 },
+            noop_sink,
+        );
 
         // Attempt device 1 with `thread::Builder::spawn` itself forced to
         // fail (see `TEST_STACK_SIZE_OVERRIDE`'s doc comment for why this,
@@ -464,7 +504,12 @@ mod tests {
         // as expected, and this panic (on the worker thread, not the test
         // thread) is a loud signal to re-check that assumption rather than
         // silently doing nothing.
-        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(Some(usize::MAX / 2)));
+        //
+        // `_override_guard` resets `TEST_STACK_SIZE_OVERRIDE` on drop (even
+        // if a panic unwinds past this point), so a future edit that adds
+        // panicking code here can't accidentally leave the override set for
+        // whichever test the harness runs next on this same OS thread.
+        let _override_guard = StackSizeOverrideGuard::set(usize::MAX / 2);
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             get_or_spawn_with_sink(
                 table,
@@ -475,7 +520,7 @@ mod tests {
                 noop_sink,
             )
         }));
-        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(None));
+        drop(_override_guard);
         assert!(
             panicked.is_err(),
             "expected the device-1 spawn to panic (thread creation should have failed)"
@@ -554,7 +599,10 @@ mod tests {
 
         let batch = drain_batch(&rx, first, 3);
 
-        assert_eq!(batch.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            batch.iter().map(|j| j.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         let remaining: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|j| j.id)
             .collect();
