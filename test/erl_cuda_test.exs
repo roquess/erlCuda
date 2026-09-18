@@ -16,4 +16,26 @@ defmodule ErlCudaTest do
       ErlCuda.launch!(:vector_add, [[1.0], [1.0, 2.0]])
     end
   end
+
+  test "launch/2 correctly correlates results for many concurrent jobs" do
+    jobs =
+      for i <- 1..10 do
+        # Each job's inputs are chosen so its expected sum is unique across
+        # the whole batch, so a cross-talk bug (job N receiving job M's
+        # result) would produce a mismatched sum instead of silently passing.
+        a = [i * 1.0]
+        b = [i * 10.0]
+        {:ok, job_id} = ErlCuda.launch(:vector_add, [a, b])
+        {job_id, i * 11.0}
+      end
+
+    # All job ids must be distinct, otherwise the assertions below couldn't
+    # tell correlated results apart from coincidentally-matching ones.
+    job_ids = Enum.map(jobs, fn {job_id, _expected_sum} -> job_id end)
+    assert length(Enum.uniq(job_ids)) == length(job_ids)
+
+    for {job_id, expected_sum} <- jobs do
+      assert_receive {:erlcuda, ^job_id, {:ok, [^expected_sum]}}, 1_000
+    end
+  end
 end
