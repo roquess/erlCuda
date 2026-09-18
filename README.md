@@ -5,8 +5,9 @@ kernels written in Rust, using [Rustler](https://github.com/rusterlium/rustler)
 NIFs as the bridge and the [Rust-CUDA](https://github.com/Rust-GPU/Rust-CUDA)
 toolchain to compile Rust to PTX.
 
-Status: **early design / pre-alpha**. Architecture below is the target shape;
-most of it is not implemented yet. Contributions and design feedback welcome.
+Status: **early alpha**. The `vector_add` kernel runs end-to-end (Elixir ->
+Rustler NIF -> dedicated GPU worker thread -> real CUDA kernel -> async
+result). The rest of the roadmap below is not implemented yet.
 
 ## Why
 
@@ -86,7 +87,7 @@ with blocking calls, but a kernel launch is not actually CPU-bound blocking
 work, and pinning the CUDA context's owning thread ourselves gives full
 control over queueing, batching, and lifetime.
 
-## Components (planned layout)
+## Components
 
 ```
 erlCuda/
@@ -146,33 +147,34 @@ codegen backend. This is tracked as a known gap to automate (e.g. a setup
 script, or vendoring a prebuilt artifact) rather than something to repeat by
 hand indefinitely.
 
-## Planned usage
+## Usage
 
 ```elixir
 defmodule Example do
   def run do
-    {:ok, ref} = ErlCuda.launch(:vector_add, [a, b])
+    {:ok, job_id} = ErlCuda.launch(:vector_add, [a, b])
 
     receive do
-      {:erlcuda, ^ref, {:ok, result}} -> result
-      {:erlcuda, ^ref, {:error, reason}} -> raise "GPU kernel failed: #{inspect(reason)}"
+      {:erlcuda, ^job_id, {:ok, result}} -> result
+      {:erlcuda, ^job_id, {:error, reason}} -> raise "GPU kernel failed: #{inspect(reason)}"
     end
   end
 end
 ```
 
-A synchronous helper (`ErlCuda.launch!/2`, wrapping the receive above with a
-timeout) will be provided for the common case.
+`ErlCuda.launch!/2` wraps the receive above with a timeout for the common
+case; see `lib/erl_cuda.ex`.
 
 ## Roadmap
 
-- [ ] `erlcuda_nif`: load Rustler skeleton, spawn GPU worker thread, own a
-      CUDA context via `cust`/`cudarc`.
-- [ ] Job/result encoding between Erlang terms and device buffers (start with
-      flat numeric arrays).
-- [ ] First kernel example (`kernels/`) built with Rust-CUDA, e.g. vector add.
-- [ ] Async completion via `enif_send`, with `ErlCuda.launch/2` returning a
-      reference and `ErlCuda.launch!/2` as a blocking convenience wrapper.
+- [x] `erlcuda_nif`: Rustler skeleton, dedicated GPU worker thread owning a
+      CUDA context via `cust`.
+- [x] Job/result encoding between Erlang terms and device buffers (flat
+      `f32` arrays).
+- [x] First kernel example (`kernels/`), `vector_add`, built with Rust-CUDA.
+- [x] Async completion via `OwnedEnv::send_and_clear`, with `ErlCuda.launch/2`
+      returning a job id and `ErlCuda.launch!/2` as a blocking convenience
+      wrapper.
 - [ ] Multi-GPU: one worker thread per device, device selection in the API.
 - [ ] Streams and batching for throughput once the single-kernel path works.
 - [ ] Benchmarks against a plain Rust/cudarc baseline to measure NIF/IPC
