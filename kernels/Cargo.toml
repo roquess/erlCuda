@@ -1,0 +1,18 @@
+[package]
+name = "erlcuda-kernels"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cuda_std = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5" }
+# `cuda_std` at this pinned commit depends on `glam = ">=0.22"` (no upper
+# bound). Without this pin, Cargo resolves the newest published glam (0.33.x
+# at the time of writing), which renamed/relocated `UVec2`/`UVec3` and no
+# longer compiles against `cuda_std` at this commit. Pin to the exact glam
+# version (0.30.9) that this commit's own Cargo.lock in the rust-cuda repo
+# uses and was actually tested against, matching its feature set exactly so
+# Cargo unifies both edges onto a single resolved version.
+glam = { version = "=0.30.9", default-features = false, features = ["libm", "cuda", "bytemuck"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

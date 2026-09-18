@@ -9,3 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.38"
+cust = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5" }
+cust_raw = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5", default-features = false, features = ["driver"] }
+
+[build-dependencies]
+cuda_builder = { git = "https://github.com/Rust-GPU/rust-cuda", rev = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5", default-features = false }
