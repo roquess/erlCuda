@@ -38,4 +38,12 @@ defmodule ErlCudaTest do
       assert_receive {:erlcuda, ^job_id, {:ok, [^expected_sum]}}, 1_000
     end
   end
+
+  test "launch/3 runs on device 0 explicitly" do
+    assert ErlCuda.launch!(:vector_add, [[1.0, 2.0], [3.0, 4.0]], device: 0) == [4.0, 6.0]
+  end
+
+  test "launch/3 returns {:error, :invalid_device} for an out-of-range device, synchronously" do
+    assert {:error, :invalid_device} = ErlCuda.launch(:vector_add, [[1.0], [1.0]], device: 99)
+  end
 end
