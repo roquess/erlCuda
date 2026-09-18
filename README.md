@@ -47,7 +47,7 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 +-------------------------------------------------------------+
 |                  GPU worker (dedicated OS thread)             |
 |                                                               |
-|  - owns the single CUDA context for this process              |
+|  - owns the CUDA context for its device (one thread per device) |
 |  - loads compiled kernel modules (PTX)                        |
 |  - launches kernel, (optionally streams / async copies)       |
 |  - on completion: OwnedEnv::send_and_clear(pid, {:erlcuda,     |
