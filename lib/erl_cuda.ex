@@ -22,7 +22,9 @@ defmodule ErlCuda do
 
   @doc """
   Synchronous wrapper around `launch/3`. Raises if the kernel errors or the
-  result does not arrive within `opts[:timeout]` milliseconds.
+  result does not arrive within `opts[:timeout]` milliseconds. Also raises
+  immediately, without ever waiting on a result, if the launch itself is
+  rejected (e.g. an invalid `:device`).
 
   ## Options
 

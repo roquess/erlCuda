@@ -46,4 +46,14 @@ defmodule ErlCudaTest do
   test "launch/3 returns {:error, :invalid_device} for an out-of-range device, synchronously" do
     assert {:error, :invalid_device} = ErlCuda.launch(:vector_add, [[1.0], [1.0]], device: 99)
   end
+
+  test "launch!/3 raises for an out-of-range device without ever entering receive" do
+    # No job is ever enqueued for an invalid device, so launch!/3 must raise
+    # from the {:error, reason} branch synchronously, before it would block
+    # on `receive`. If it incorrectly fell through to `receive`, this test
+    # would hang until the default 5_000ms timeout instead of failing fast.
+    assert_raise RuntimeError, ~r/GPU kernel failed to launch/, fn ->
+      ErlCuda.launch!(:vector_add, [[1.0], [1.0]], device: 99)
+    end
+  end
 end

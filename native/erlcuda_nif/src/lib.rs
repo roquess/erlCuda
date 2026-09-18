@@ -39,9 +39,13 @@ fn launch_vector_add<'a>(env: Env<'a>, a: Vec<f32>, b: Vec<f32>, device: u32) ->
 /// job for it is enqueued. Rejecting an out-of-range `device` here keeps it
 /// from ever reaching `worker::sender`/`get_or_spawn`, which mitigates (but,
 /// per the Task 1 review note, does not fully eliminate) the `WORKERS` mutex
-/// poisoning risk: a device that passes this check but still fails to
-/// initialize a CUDA context for some other reason could still panic while
-/// the lock is held.
+/// poisoning risk: `get_or_spawn`'s `entry(...).or_insert_with(...)` runs
+/// `spawn_worker` while the lock is held, and `spawn_worker`'s own
+/// `thread::Builder::spawn(...).expect(...)` call is synchronous, so it can
+/// still poison the lock if launching the OS thread itself fails (e.g. under
+/// resource exhaustion). A `CudaBackend::new` failure, by contrast, panics
+/// later on the already-detached worker thread, after `get_or_spawn` has
+/// returned and the lock has been released.
 fn validate_device(device: u32) -> Result<(), rustler::Atom> {
     cust::init(CudaFlags::empty()).expect("cust::init failed");
     let count = Device::num_devices().expect("Device::num_devices failed");
