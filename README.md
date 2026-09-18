@@ -7,7 +7,8 @@ toolchain to compile Rust to PTX.
 
 Status: **early alpha**. The `vector_add` kernel runs end-to-end (Elixir ->
 Rustler NIF -> dedicated GPU worker thread -> real CUDA kernel -> async
-result). The rest of the roadmap below is not implemented yet.
+result), with explicit multi-GPU device selection. Streams/batching and
+benchmarks (see Roadmap below) are not implemented yet.
 
 ## Why
 
