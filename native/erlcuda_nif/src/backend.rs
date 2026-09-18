@@ -35,8 +35,13 @@ pub struct CudaBackend {
 }
 
 impl CudaBackend {
-    pub fn new() -> Result<Self, String> {
-        let ctx = cust::quick_init().map_err(|e| format!("cust::quick_init failed: {e:?}"))?;
+    pub fn new(device: u32) -> Result<Self, String> {
+        cust::init(CudaFlags::empty()).map_err(|e| format!("cust::init failed: {e:?}"))?;
+        let dev = Device::get_device(device)
+            .map_err(|e| format!("Device::get_device({device}) failed: {e:?}"))?;
+        let ctx = Context::new(dev).map_err(|e| format!("Context::new failed: {e:?}"))?;
+        ctx.set_flags(ContextFlags::SCHED_AUTO)
+            .map_err(|e| format!("Context::set_flags failed: {e:?}"))?;
         let module =
             Module::from_ptx(PTX, &[]).map_err(|e| format!("Module::from_ptx failed: {e:?}"))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -119,10 +124,15 @@ mod tests {
     }
 
     #[test]
+    fn cuda_backend_new_accepts_device_zero() {
+        CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+    }
+
+    #[test]
     fn cuda_backend_matches_cpu_backend() {
         let mut cpu = CpuBackend;
         let mut cuda =
-            CudaBackend::new().expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
+            CudaBackend::new(0).expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
 
         let a = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let b = vec![10.0f32, 20.0, 30.0, 40.0, 50.0];
@@ -137,7 +147,7 @@ mod tests {
     fn cuda_backend_matches_cpu_backend_across_multiple_blocks() {
         let mut cpu = CpuBackend;
         let mut cuda =
-            CudaBackend::new().expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
+            CudaBackend::new(0).expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
 
         let len = 100_000;
         let a: Vec<f32> = (0..len).map(|i| i as f32).collect();

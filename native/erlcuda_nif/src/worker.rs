@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use rustler::types::LocalPid;
@@ -16,12 +17,62 @@ mod atoms {
     }
 }
 
-static JOB_SENDER: OnceLock<Sender<Job>> = OnceLock::new();
-
-pub fn sender() -> &'static Sender<Job> {
-    JOB_SENDER.get_or_init(|| {
-        spawn_worker(|| CudaBackend::new().expect("failed to initialize CUDA backend"))
+pub fn sender(device: u32) -> Sender<Job> {
+    static WORKERS: OnceLock<Mutex<HashMap<u32, Sender<Job>>>> = OnceLock::new();
+    let table = WORKERS.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_spawn(table, device, move || {
+        CudaBackend::new(device).expect("failed to initialize CUDA backend")
     })
+}
+
+/// Looks up the cached worker `Sender` for `device`, spawning a new worker
+/// thread (and its backend) via `make_backend` only the first time `device`
+/// is requested. Subsequent calls for the same `device` reuse the cached,
+/// cheaply-cloneable `Sender` instead of spawning a second backend/thread for
+/// it.
+fn get_or_spawn<B, F>(
+    table: &Mutex<HashMap<u32, Sender<Job>>>,
+    device: u32,
+    make_backend: F,
+) -> Sender<Job>
+where
+    B: Backend,
+    F: FnOnce() -> B + Send + 'static,
+{
+    let mut workers = table.lock().expect("erlcuda WORKERS mutex poisoned");
+    workers
+        .entry(device)
+        .or_insert_with(|| spawn_worker(make_backend))
+        .clone()
+}
+
+/// Test-only variant of `get_or_spawn` with an injectable outcome sink.
+///
+/// This mirrors the `spawn_worker`/`spawn_worker_with_sink` split below:
+/// `get_or_spawn` always wires up the real `send_outcome`, which calls into
+/// `OwnedEnv`/BEAM NIF FFI that is only valid when this code is actually
+/// running as a loaded NIF inside the BEAM. Invoking it from a plain
+/// `cargo test` process (as the routing test below does, via `fake_pid()`)
+/// hits an uninitialized FFI function table and hard-aborts the process. So
+/// tests exercise the per-device caching/routing logic through this
+/// sink-injectable variant instead, with a no-op sink.
+#[cfg(test)]
+fn get_or_spawn_with_sink<B, F, S>(
+    table: &Mutex<HashMap<u32, Sender<Job>>>,
+    device: u32,
+    make_backend: F,
+    on_outcome: S,
+) -> Sender<Job>
+where
+    B: Backend,
+    F: FnOnce() -> B + Send + 'static,
+    S: Fn(&LocalPid, u64, Result<Vec<f32>, String>) + Send + 'static,
+{
+    let mut workers = table.lock().expect("erlcuda WORKERS mutex poisoned");
+    workers
+        .entry(device)
+        .or_insert_with(|| spawn_worker_with_sink(make_backend, on_outcome).0)
+        .clone()
 }
 
 fn spawn_worker<B, F>(make_backend: F) -> Sender<Job>
@@ -208,5 +259,91 @@ mod tests {
             1,
             "backend must not be called again after the channel disconnects"
         );
+    }
+
+    #[test]
+    fn routes_different_devices_to_independent_backends_and_caches_the_sender() {
+        let workers: OnceLock<Mutex<HashMap<u32, Sender<Job>>>> = OnceLock::new();
+        let table = workers.get_or_init(|| Mutex::new(HashMap::new()));
+
+        let calls_0: Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_1: Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Use a no-op outcome sink rather than the real `send_outcome`: the
+        // real one calls into BEAM NIF FFI via `fake_pid()`, which is only
+        // sound to invoke from inside an actual loaded NIF (see
+        // `get_or_spawn_with_sink`'s doc comment) — this test runs as plain
+        // `cargo test` code, so it exercises the device-routing/caching logic
+        // through `get_or_spawn_with_sink` directly instead of going through
+        // production's `get_or_spawn`.
+        let noop_sink = |_pid: &LocalPid, _id: u64, _result: Result<Vec<f32>, String>| {};
+
+        let c0 = calls_0.clone();
+        let sender_0 =
+            get_or_spawn_with_sink(table, 0, move || RecordingBackend { calls: c0 }, noop_sink);
+        let c1 = calls_1.clone();
+        let sender_1 =
+            get_or_spawn_with_sink(table, 1, move || RecordingBackend { calls: c1 }, noop_sink);
+
+        // Requesting device 0 again must reuse the cached sender, NOT spawn a
+        // second worker/backend for the same device — the factory panicking
+        // if invoked proves this.
+        let sender_0_again = get_or_spawn_with_sink(
+            table,
+            0,
+            || -> RecordingBackend { panic!("must not respawn device 0") },
+            noop_sink,
+        );
+
+        sender_0
+            .send(Job {
+                id: 1,
+                pid: fake_pid(),
+                a: vec![1.0],
+                b: vec![10.0],
+            })
+            .unwrap();
+        sender_0_again
+            .send(Job {
+                id: 2,
+                pid: fake_pid(),
+                a: vec![2.0],
+                b: vec![20.0],
+            })
+            .unwrap();
+        sender_1
+            .send(Job {
+                id: 3,
+                pid: fake_pid(),
+                a: vec![3.0],
+                b: vec![30.0],
+            })
+            .unwrap();
+
+        drop(sender_0);
+        drop(sender_0_again);
+        drop(sender_1);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let done_0 = calls_0.lock().unwrap().len() == 2;
+            let done_1 = calls_1.lock().unwrap().len() == 1;
+            if done_0 && done_1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both device queues to drain (device 0: {}, device 1: {})",
+                calls_0.lock().unwrap().len(),
+                calls_1.lock().unwrap().len()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            *calls_0.lock().unwrap(),
+            vec![(vec![1.0], vec![10.0]), (vec![2.0], vec![20.0])]
+        );
+        assert_eq!(*calls_1.lock().unwrap(), vec![(vec![3.0], vec![30.0])]);
     }
 }
