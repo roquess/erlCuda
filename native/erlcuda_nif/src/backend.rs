@@ -1,5 +1,14 @@
 pub trait Backend {
     fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String>;
+
+    /// Runs several `(a, b)` pairs and returns one result per input, in the
+    /// same order. The default implementation just loops `vector_add` — a
+    /// backend only needs to override this if it can do better than one
+    /// call per pair (e.g. `CudaBackend`, which coalesces the whole batch
+    /// into a single kernel launch).
+    fn vector_add_batch(&mut self, jobs: &[(&[f32], &[f32])]) -> Vec<Result<Vec<f32>, String>> {
+        jobs.iter().map(|(a, b)| self.vector_add(a, b)).collect()
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -52,14 +61,12 @@ impl CudaBackend {
             _ctx: ctx,
         })
     }
-}
 
-impl Backend for CudaBackend {
-    fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-        if a.len() != b.len() {
-            return Err(format!("length mismatch: {} vs {}", a.len(), b.len()));
-        }
-
+    /// Uploads `a`/`b` (already known to be the same length), launches
+    /// `vector_add` once over the whole buffer, and returns the result.
+    /// Callers are responsible for length validation before calling this —
+    /// it assumes `a.len() == b.len()`.
+    fn launch_flat(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
         let len = a.len();
         let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e:?}"))?;
         let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e:?}"))?;
@@ -100,6 +107,58 @@ impl Backend for CudaBackend {
             .map_err(|e| format!("copy_to failed: {e:?}"))?;
 
         Ok(out)
+    }
+}
+
+impl Backend for CudaBackend {
+    fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
+        self.vector_add_batch(&[(a, b)])
+            .into_iter()
+            .next()
+            .expect("vector_add_batch must return exactly one result per input")
+    }
+
+    fn vector_add_batch(&mut self, jobs: &[(&[f32], &[f32])]) -> Vec<Result<Vec<f32>, String>> {
+        let mut results: Vec<Option<Result<Vec<f32>, String>>> = vec![None; jobs.len()];
+        let mut valid_indices = Vec::new();
+
+        for (i, (a, b)) in jobs.iter().enumerate() {
+            if a.len() != b.len() {
+                results[i] = Some(Err(format!("length mismatch: {} vs {}", a.len(), b.len())));
+            } else {
+                valid_indices.push(i);
+            }
+        }
+
+        if !valid_indices.is_empty() {
+            let mut flat_a = Vec::new();
+            let mut flat_b = Vec::new();
+            let mut offsets = Vec::with_capacity(valid_indices.len());
+            for &i in &valid_indices {
+                let (a, b) = jobs[i];
+                offsets.push((flat_a.len(), a.len()));
+                flat_a.extend_from_slice(a);
+                flat_b.extend_from_slice(b);
+            }
+
+            match self.launch_flat(&flat_a, &flat_b) {
+                Ok(flat_out) => {
+                    for (&i, &(offset, len)) in valid_indices.iter().zip(offsets.iter()) {
+                        results[i] = Some(Ok(flat_out[offset..offset + len].to_vec()));
+                    }
+                }
+                Err(e) => {
+                    for &i in &valid_indices {
+                        results[i] = Some(Err(e.clone()));
+                    }
+                }
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|r| r.expect("every job index must have been assigned a result"))
+            .collect()
     }
 }
 
@@ -157,5 +216,48 @@ mod tests {
         let actual = cuda.vector_add(&a, &b).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cuda_backend_batch_matches_cpu_backend_per_job_with_different_lengths() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
+            (vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]),
+            (vec![1.0], vec![100.0]),
+            (vec![5.0, 6.0, 7.0, 8.0, 9.0], vec![0.5, 0.5, 0.5, 0.5, 0.5]),
+        ];
+        let jobs: Vec<(&[f32], &[f32])> =
+            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+
+        let results = cuda.vector_add_batch(&jobs);
+        assert_eq!(results.len(), jobs_owned.len());
+
+        for ((a, b), result) in jobs_owned.iter().zip(results) {
+            let expected = cpu.vector_add(a, b).unwrap();
+            assert_eq!(result.unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cuda_backend_batch_isolates_a_length_mismatch_from_the_other_jobs() {
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
+            (vec![1.0, 2.0], vec![10.0, 20.0]),  // valid
+            (vec![1.0, 2.0, 3.0], vec![1.0]),    // invalid: length mismatch
+            (vec![5.0], vec![50.0]),             // valid
+        ];
+        let jobs: Vec<(&[f32], &[f32])> =
+            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+
+        let results = cuda.vector_add_batch(&jobs);
+
+        assert_eq!(results[0].as_ref().unwrap(), &vec![11.0, 22.0]);
+        assert!(results[1].as_ref().unwrap_err().contains("length mismatch"));
+        assert_eq!(results[2].as_ref().unwrap(), &vec![55.0]);
     }
 }
