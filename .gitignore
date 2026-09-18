@@ -7,6 +7,7 @@
 # Rust
 /native/erlcuda_nif/target/
 /kernels/target/
+/priv/
 
 # Plans (never committed, per project convention)
 /docs/superpowers/plans/
