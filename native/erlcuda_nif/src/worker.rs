@@ -241,7 +241,7 @@ mod tests {
         }
 
         // Dropping every sender disconnects the channel, which ends the
-        // worker's `for job in rx` loop.
+        // worker's `while let Ok(first) = rx.recv()` loop.
         drop(tx);
         join_within(handle, Duration::from_secs(5));
 
