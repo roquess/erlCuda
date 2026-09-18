@@ -6,7 +6,7 @@ mod atoms {
     }
 }
 
-mod backend;
+pub mod backend;
 mod job;
 mod worker;
 
