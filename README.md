@@ -98,7 +98,8 @@ control over queueing, batching, and lifetime.
 ```
 erlCuda/
 ├── lib/                    # Elixir public API (ErlCuda module)
-├── src/                    # Erlang sources, if any pure-Erlang glue is needed
+├── src/
+│   └── erlcuda.erl          # idiomatic Erlang wrapper (launch/2,3, launch_sync/2,3)
 ├── native/
 │   └── erlcuda_nif/        # Rust crate, Rustler NIF + GPU worker thread
 │       ├── src/
@@ -113,6 +114,8 @@ erlCuda/
 │   │   └── lib.rs           # #[no_std] kernel functions
 │   └── Cargo.toml            # built with rustc_codegen_nvvm (Rust-CUDA)
 ├── test/
+├── bench/
+│   └── erlcuda_bench.exs    # full-stack latency benchmark (see Benchmarks below)
 ├── mix.exs
 └── LICENSE
 ```
