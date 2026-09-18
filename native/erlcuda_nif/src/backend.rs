@@ -2,6 +2,7 @@ pub trait Backend {
     fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String>;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct CpuBackend;
 
 impl Backend for CpuBackend {
@@ -125,6 +126,22 @@ mod tests {
 
         let a = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let b = vec![10.0f32, 20.0, 30.0, 40.0, 50.0];
+
+        let expected = cpu.vector_add(&a, &b).unwrap();
+        let actual = cuda.vector_add(&a, &b).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cuda_backend_matches_cpu_backend_across_multiple_blocks() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new().expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
+
+        let len = 100_000;
+        let a: Vec<f32> = (0..len).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..len).map(|i| (i as f32) * 2.0).collect();
 
         let expected = cpu.vector_add(&a, &b).unwrap();
         let actual = cuda.vector_add(&a, &b).unwrap();
