@@ -243,9 +243,11 @@ likely from ambient GPU/driver/thermal state at the time of each session.
 
 **Taken together, the honest conclusion is that this benchmark cannot
 reliably determine even the *direction* of erlCuda's overhead at this vector
-size, let alone its magnitude.** Two separate sessions each looked internally
-consistent (tight ranges, no overlap between the two programs) while
-disagreeing with each other about which side was faster. Whatever the true
+size, let alone its magnitude.** Session 1's two ranges didn't overlap at
+all; session 2's overlapped somewhat (431.6-440.9us shared by both), but its
+means still moved in the opposite direction from session 1's. Either way,
+the two sessions disagree with each other about which side was faster.
+Whatever the true
 NIF/channel overhead is at 1000 elements, it is evidently small enough to be
 dominated by session-to-session noise (GPU clock/power state, driver
 scheduling, background load) when measured this way — one-shot process
