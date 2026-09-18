@@ -17,6 +17,12 @@ mod atoms {
     }
 }
 
+/// Caps how many jobs a single batch/kernel launch can cover, bounding
+/// worst-case memory and launch-configuration size under a flood of jobs.
+/// Arbitrary but reasonable for now; not derived from a specific
+/// measurement (that's what benchmarking, a separate later step, is for).
+const MAX_BATCH_SIZE: usize = 256;
+
 pub fn sender(device: u32) -> Sender<Job> {
     static WORKERS: OnceLock<Mutex<HashMap<u32, Sender<Job>>>> = OnceLock::new();
     let table = WORKERS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -83,10 +89,11 @@ where
     spawn_worker_with_sink(make_backend, send_outcome).0
 }
 
-/// Spawns the worker thread, draining `Job`s from a fresh channel and calling
-/// `backend.vector_add` once per job, in order, feeding each outcome to
-/// `on_outcome`. The thread exits once the channel is disconnected (i.e. every
-/// `Sender<Job>` clone has been dropped).
+/// Spawns the worker thread, draining `Job`s from a fresh channel and
+/// opportunistically batching whatever's already queued (via `drain_batch`)
+/// into a single `backend.vector_add_batch` call per batch, in order, feeding
+/// each outcome to `on_outcome`. The thread exits once the channel is
+/// disconnected (i.e. every `Sender<Job>` clone has been dropped).
 ///
 /// This is split out from `spawn_worker` so tests can inject a stub `Backend`
 /// and a recording `on_outcome` sink, observing the worker's thread lifecycle
@@ -109,14 +116,41 @@ where
         .name("erlcuda-gpu-worker".into())
         .spawn(move || {
             let mut backend = make_backend();
-            for job in rx {
-                let result = backend.vector_add(&job.a, &job.b);
-                on_outcome(&job.pid, job.id, result);
+            while let Ok(first) = rx.recv() {
+                let batch = drain_batch(&rx, first, MAX_BATCH_SIZE);
+                let inputs: Vec<(&[f32], &[f32])> = batch
+                    .iter()
+                    .map(|job| (job.a.as_slice(), job.b.as_slice()))
+                    .collect();
+                let results = backend.vector_add_batch(&inputs);
+                for (job, result) in batch.into_iter().zip(results) {
+                    on_outcome(&job.pid, job.id, result);
+                }
             }
         })
         .expect("failed to spawn erlcuda GPU worker thread");
 
     (tx, handle)
+}
+
+/// Given a job that's already been received (via a blocking `recv`),
+/// opportunistically drains any additional jobs already sitting in the
+/// channel via non-blocking `try_recv`, up to `cap` jobs total. Stops as
+/// soon as the channel has nothing more queued right now, or `cap` is hit.
+///
+/// This is intentionally a pure function over `&Receiver` (not a method on
+/// the worker thread's loop) so it can be tested deterministically: a test
+/// can pre-load a channel with jobs and call this directly, with no thread
+/// spawning or timing involved.
+fn drain_batch(rx: &Receiver<Job>, first: Job, cap: usize) -> Vec<Job> {
+    let mut batch = vec![first];
+    while batch.len() < cap {
+        match rx.try_recv() {
+            Ok(job) => batch.push(job),
+            Err(_) => break,
+        }
+    }
+    batch
 }
 
 fn send_outcome(pid: &LocalPid, id: u64, result: Result<Vec<f32>, String>) {
@@ -345,5 +379,55 @@ mod tests {
             vec![(vec![1.0], vec![10.0]), (vec![2.0], vec![20.0])]
         );
         assert_eq!(*calls_1.lock().unwrap(), vec![(vec![3.0], vec![30.0])]);
+    }
+
+    #[test]
+    fn drain_batch_drains_everything_currently_queued_when_under_the_cap() {
+        let (tx, rx) = mpsc::channel();
+        for i in 2..=4u64 {
+            tx.send(Job {
+                id: i,
+                pid: fake_pid(),
+                a: vec![i as f32],
+                b: vec![0.0],
+            })
+            .unwrap();
+        }
+        let first = Job {
+            id: 1,
+            pid: fake_pid(),
+            a: vec![1.0],
+            b: vec![0.0],
+        };
+
+        let batch = drain_batch(&rx, first, 256);
+
+        assert_eq!(
+            batch.iter().map(|j| j.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn drain_batch_stops_at_the_cap_leaving_the_remainder_in_the_channel() {
+        let (tx, rx) = mpsc::channel();
+        for i in 1..=5u64 {
+            tx.send(Job {
+                id: i,
+                pid: fake_pid(),
+                a: vec![i as f32],
+                b: vec![0.0],
+            })
+            .unwrap();
+        }
+        let first = rx.recv().unwrap();
+
+        let batch = drain_batch(&rx, first, 3);
+
+        assert_eq!(batch.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        let remaining: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(remaining, vec![4, 5]);
     }
 }
