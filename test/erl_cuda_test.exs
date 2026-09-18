@@ -56,4 +56,14 @@ defmodule ErlCudaTest do
       ErlCuda.launch!(:vector_add, [[1.0], [1.0]], device: 99)
     end
   end
+
+  test "the Erlang wrapper's launch/3 computes vector_add asynchronously" do
+    {:ok, job_id} = :erlcuda.launch(:vector_add, [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], device: 0)
+
+    assert_receive {:erlcuda, ^job_id, {:ok, [11.0, 22.0, 33.0]}}, 1_000
+  end
+
+  test "the Erlang wrapper's launch_sync/2 returns the result synchronously" do
+    assert :erlcuda.launch_sync(:vector_add, [[1.0, 2.0], [3.0, 4.0]]) == [4.0, 6.0]
+  end
 end
