@@ -66,4 +66,9 @@ defmodule ErlCudaTest do
   test "the Erlang wrapper's launch_sync/2 returns the result synchronously" do
     assert :erlcuda.launch_sync(:vector_add, [[1.0, 2.0], [3.0, 4.0]]) == [4.0, 6.0]
   end
+
+  test "the Erlang wrapper's launch/3 returns {:error, :invalid_device} for an out-of-range device" do
+    assert {:error, :invalid_device} =
+             :erlcuda.launch(:vector_add, [[1.0], [1.0]], device: 99)
+  end
 end

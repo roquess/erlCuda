@@ -9,7 +9,7 @@
 -export([launch/2, launch/3, launch_sync/2, launch_sync/3]).
 
 launch(Kernel, Args) ->
-    'Elixir.ErlCuda':launch(Kernel, Args).
+    launch(Kernel, Args, []).
 
 launch(Kernel, Args, Opts) ->
     'Elixir.ErlCuda':launch(Kernel, Args, Opts).
@@ -18,7 +18,7 @@ launch(Kernel, Args, Opts) ->
 %% that's the Erlang send operator, not an idiomatic function-name
 %% character.
 launch_sync(Kernel, Args) ->
-    'Elixir.ErlCuda':'launch!'(Kernel, Args).
+    launch_sync(Kernel, Args, []).
 
 launch_sync(Kernel, Args, Opts) ->
     'Elixir.ErlCuda':'launch!'(Kernel, Args, Opts).
