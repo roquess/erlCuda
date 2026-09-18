@@ -7,6 +7,10 @@ edition = "2021"
 name = "erlcuda_nif"
 crate-type = ["cdylib", "rlib"]
 
+# `bench` gates bench_pure_cuda ([[bin]] below) so it isn't built (and thus
+# never copied into priv/native/) by default `cargo build`/`mix compile`.
+# Run the benchmark with:
+#   cargo run --release --features bench --bin bench_pure_cuda
 [features]
 bench = []
 
