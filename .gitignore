@@ -1,0 +1,12 @@
+# Elixir / Mix
+/_build/
+/deps/
+/erl_crash.dump
+*.ez
+
+# Rust
+/native/erlcuda_nif/target/
+/kernels/target/
+
+# Plans (never committed, per project convention)
+/docs/superpowers/plans/
