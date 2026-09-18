@@ -144,16 +144,14 @@ cd <path-to-rust-cuda-checkout>
 cargo build -p rustc_codegen_nvvm --release
 ```
 
-Then add both of these to `PATH` before building `native/erlcuda_nif/`:
-- that checkout's `target/release/` directory (contains `rustc_codegen_nvvm`'s
-  dynamic library),
-- the CUDA toolkit's `nvvm/bin` directory (e.g.
-  `%CUDA_PATH%\nvvm\bin` on Windows, `$CUDA_PATH/nvvm/bin` on Linux).
+Once built, `native/erlcuda_nif/build.rs` automatically finds it and extends
+its own `PATH` for the build — you don't need to manually export `PATH` in
+every new shell session. The one-time `cargo build -p rustc_codegen_nvvm
+--release` step above is still required if you've never built it on this
+machine before.
 
-Without this, `cargo build` in `native/erlcuda_nif/` fails to locate the
-codegen backend. This is tracked as a known gap to automate (e.g. a setup
-script, or vendoring a prebuilt artifact) rather than something to repeat by
-hand indefinitely.
+Without that one-time build, `cargo build` in `native/erlcuda_nif/` fails to
+locate the codegen backend.
 
 ## Usage
 

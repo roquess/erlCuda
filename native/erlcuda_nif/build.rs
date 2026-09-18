@@ -3,9 +3,92 @@ use std::path::PathBuf;
 
 use cuda_builder::CudaBuilder;
 
+const CODEGEN_NVVM_DYLIB_NAMES: [&str; 3] = [
+    "rustc_codegen_nvvm.dll",
+    "librustc_codegen_nvvm.so",
+    "librustc_codegen_nvvm.dylib",
+];
+
+fn is_codegen_nvvm_already_on_path() -> bool {
+    let Some(path_var) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path_var)
+        .any(|dir| CODEGEN_NVVM_DYLIB_NAMES.iter().any(|name| dir.join(name).is_file()))
+}
+
+fn cargo_home() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("CARGO_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".cargo"))
+}
+
+/// Searches `<cargo home>/git/checkouts/rust-cuda-*/*/target/release/` for an
+/// already-built `rustc_codegen_nvvm` dynamic library, from any prior manual
+/// build following this project's README instructions. Returns the
+/// directory containing it, if found. Any matching checkout is accepted, not
+/// just the exact pinned rev's own hash-prefixed directory, since what
+/// matters is the binary being from a compatible build of the same pinned
+/// commit already used elsewhere in this project.
+fn find_prebuilt_codegen_nvvm_dir() -> Option<PathBuf> {
+    let checkouts_dir = cargo_home()?.join("git").join("checkouts");
+    for repo_entry in std::fs::read_dir(&checkouts_dir).ok()?.flatten() {
+        if !repo_entry.file_name().to_string_lossy().starts_with("rust-cuda-") {
+            continue;
+        }
+        let Ok(rev_entries) = std::fs::read_dir(repo_entry.path()) else {
+            continue;
+        };
+        for rev_entry in rev_entries.flatten() {
+            let release_dir = rev_entry.path().join("target").join("release");
+            if CODEGEN_NVVM_DYLIB_NAMES.iter().any(|name| release_dir.join(name).is_file()) {
+                return Some(release_dir);
+            }
+        }
+    }
+    None
+}
+
+/// Auto-extends this build script's own `PATH` with an already-built
+/// `rustc_codegen_nvvm` (if found) and CUDA's `nvvm/bin` (from `CUDA_PATH`),
+/// so `CudaBuilder`'s nested `cargo` invocation (which inherits this
+/// process's environment) can find the codegen backend without requiring
+/// the developer to manually export `PATH` every shell session. If nothing
+/// is found, this is a no-op and the existing manual-setup error path
+/// (documented in README.md) still applies unchanged.
+fn extend_path_for_cuda_codegen_backend() {
+    if is_codegen_nvvm_already_on_path() {
+        return;
+    }
+    let Some(codegen_dir) = find_prebuilt_codegen_nvvm_dir() else {
+        return;
+    };
+
+    let mut dirs = vec![codegen_dir];
+    if let Some(cuda_path) = env::var_os("CUDA_PATH") {
+        dirs.push(PathBuf::from(cuda_path).join("nvvm").join("bin"));
+    }
+    if let Some(existing) = env::var_os("PATH") {
+        dirs.extend(env::split_paths(&existing));
+    }
+
+    if let Ok(new_path) = env::join_paths(dirs) {
+        println!(
+            "cargo::warning=erlCuda: auto-added a previously-built rustc_codegen_nvvm to PATH for this build"
+        );
+        unsafe {
+            env::set_var("PATH", new_path);
+        }
+    }
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=../../kernels");
+
+    extend_path_for_cuda_codegen_backend();
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
