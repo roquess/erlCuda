@@ -286,4 +286,25 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
         assert_eq!(results[1].as_ref().unwrap(), &vec![11.0, 22.0]);
     }
+
+    #[test]
+    fn cuda_backend_batch_of_only_empty_pairs_does_not_touch_the_gpu_launch() {
+        // Unlike `cuda_backend_batch_handles_an_empty_pair` (where a
+        // non-empty job in the same batch keeps the concatenated flat
+        // buffer non-empty regardless), this batch has no non-empty job at
+        // all: `valid_indices` ends up empty, so the flat-buffer/launch_flat
+        // path must never run. Before the empty-vector fix, a batch shaped
+        // like this reached `launch_flat` with a zero-length buffer and
+        // failed with `InvalidValue`.
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![(vec![], vec![])];
+        let jobs: Vec<(&[f32], &[f32])> =
+            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+
+        let results = cuda.vector_add_batch(&jobs);
+
+        assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
+    }
 }
