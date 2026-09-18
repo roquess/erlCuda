@@ -5,7 +5,7 @@ use std::thread;
 use rustler::types::LocalPid;
 use rustler::{Encoder, OwnedEnv};
 
-use crate::backend::{Backend, CpuBackend};
+use crate::backend::{Backend, CudaBackend};
 use crate::job::Job;
 
 mod atoms {
@@ -19,7 +19,9 @@ mod atoms {
 static JOB_SENDER: OnceLock<Sender<Job>> = OnceLock::new();
 
 pub fn sender() -> &'static Sender<Job> {
-    JOB_SENDER.get_or_init(|| spawn_worker(|| CpuBackend))
+    JOB_SENDER.get_or_init(|| {
+        spawn_worker(|| CudaBackend::new().expect("failed to initialize CUDA backend"))
+    })
 }
 
 fn spawn_worker<B, F>(make_backend: F) -> Sender<Job>
