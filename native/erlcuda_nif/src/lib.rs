@@ -36,16 +36,15 @@ fn launch_vector_add<'a>(env: Env<'a>, a: Vec<f32>, b: Vec<f32>, device: u32) ->
 }
 
 /// Validates that `device` refers to a real GPU on this machine before any
-/// job for it is enqueued. Rejecting an out-of-range `device` here keeps it
-/// from ever reaching `worker::sender`/`get_or_spawn`, which mitigates (but,
-/// per the Task 1 review note, does not fully eliminate) the `WORKERS` mutex
-/// poisoning risk: `get_or_spawn`'s `entry(...).or_insert_with(...)` runs
-/// `spawn_worker` while the lock is held, and `spawn_worker`'s own
-/// `thread::Builder::spawn(...).expect(...)` call is synchronous, so it can
-/// still poison the lock if launching the OS thread itself fails (e.g. under
-/// resource exhaustion). A `CudaBackend::new` failure, by contrast, panics
-/// later on the already-detached worker thread, after `get_or_spawn` has
-/// returned and the lock has been released.
+/// job for it is enqueued, returning a clean `{:error, :invalid_device}`
+/// for an out-of-range value instead of ever reaching `worker::sender`.
+///
+/// This is a separate concern from the `WORKERS` mutex poisoning risk that
+/// used to exist in `get_or_spawn`: that risk (a panic during
+/// `thread::Builder::spawn(...).expect(...)`, e.g. under OS resource
+/// exhaustion, poisoning the lock for every other device) is now fixed via
+/// double-checked locking in `get_or_spawn`/`get_or_spawn_with_sink`, which
+/// spawns the worker thread outside of any lock on `WORKERS`.
 fn validate_device(device: u32) -> Result<(), rustler::Atom> {
     cust::init(CudaFlags::empty()).expect("cust::init failed");
     let count = Device::num_devices().expect("Device::num_devices failed");

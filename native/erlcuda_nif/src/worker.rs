@@ -36,19 +36,33 @@ pub fn sender(device: u32) -> Sender<Job> {
 /// is requested. Subsequent calls for the same `device` reuse the cached,
 /// cheaply-cloneable `Sender` instead of spawning a second backend/thread for
 /// it.
-fn get_or_spawn<B, F>(
-    table: &Mutex<HashMap<u32, Sender<Job>>>,
-    device: u32,
-    make_backend: F,
-) -> Sender<Job>
+///
+/// Uses double-checked locking so the spawn itself happens *outside* any
+/// lock: if `make_backend`/thread creation panics (e.g. OS thread creation
+/// failing under resource exhaustion), that panic can never occur while a
+/// `MutexGuard` on `table` is alive, so it can never poison `table` for
+/// other, unrelated devices. The accepted trade-off is a narrow, harmless
+/// race: two concurrent first-time calls for the *same* device can each
+/// spawn a worker thread, with only one kept in the map — the other's
+/// `Sender` is simply dropped, leaving an idle worker thread that never
+/// receives any job and eventually just sits blocked forever, which wastes
+/// one thread but causes no crash or incorrect behavior.
+fn get_or_spawn<B, F>(table: &Mutex<HashMap<u32, Sender<Job>>>, device: u32, make_backend: F) -> Sender<Job>
 where
     B: Backend,
     F: FnOnce() -> B + Send + 'static,
 {
-    let mut workers = table.lock().expect("erlcuda WORKERS mutex poisoned");
-    workers
+    if let Some(sender) = table.lock().expect("erlcuda WORKERS mutex poisoned").get(&device) {
+        return sender.clone();
+    }
+
+    let sender = spawn_worker(make_backend);
+
+    table
+        .lock()
+        .expect("erlcuda WORKERS mutex poisoned")
         .entry(device)
-        .or_insert_with(|| spawn_worker(make_backend))
+        .or_insert(sender)
         .clone()
 }
 
@@ -74,10 +88,17 @@ where
     F: FnOnce() -> B + Send + 'static,
     S: Fn(&LocalPid, u64, Result<Vec<f32>, String>) + Send + 'static,
 {
-    let mut workers = table.lock().expect("erlcuda WORKERS mutex poisoned");
-    workers
+    if let Some(sender) = table.lock().expect("erlcuda WORKERS mutex poisoned").get(&device) {
+        return sender.clone();
+    }
+
+    let sender = spawn_worker_with_sink(make_backend, on_outcome).0;
+
+    table
+        .lock()
+        .expect("erlcuda WORKERS mutex poisoned")
         .entry(device)
-        .or_insert_with(|| spawn_worker_with_sink(make_backend, on_outcome).0)
+        .or_insert(sender)
         .clone()
 }
 
@@ -87,6 +108,38 @@ where
     F: FnOnce() -> B + Send + 'static,
 {
     spawn_worker_with_sink(make_backend, send_outcome).0
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook consulted by `spawn_worker_with_sink`: when set (via
+    /// `Cell::set`), overrides the stack size used for the *next* worker
+    /// thread spawned on this same (test) thread.
+    ///
+    /// This exists to let a test deterministically force
+    /// `thread::Builder::spawn` itself to fail, simulating "OS thread
+    /// creation fails under resource exhaustion" — the real, documented
+    /// risk the double-checked locking in `get_or_spawn`/
+    /// `get_or_spawn_with_sink` guards against. An absurdly large stack size
+    /// (e.g. `usize::MAX / 2`) is rejected by the OS immediately as an
+    /// invalid parameter, with no actual memory reserved, so this is fast
+    /// and side-effect-free.
+    ///
+    /// A panic from `make_backend` itself can't be used for this instead:
+    /// `make_backend` only ever runs *inside* the newly spawned thread's own
+    /// closure (see below), never synchronously on the caller, so it can
+    /// never occur while the caller holds `WORKERS`'s `MutexGuard` — no
+    /// matter how `get_or_spawn`/`get_or_spawn_with_sink` lock the table.
+    /// (Constructing the backend synchronously on the caller instead, so a
+    /// factory panic *would* land under the lock, was considered and
+    /// rejected: `CudaBackend::new` creates a CUDA context that is current
+    /// only on the thread that created it, so building it on the caller
+    /// while every GPU call happens later on the worker thread would break
+    /// real GPU execution.)
+    ///
+    /// `None` (the default) leaves the builder's normal default stack size
+    /// untouched, so production code and every other test are unaffected.
+    static TEST_STACK_SIZE_OVERRIDE: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
 }
 
 /// Spawns the worker thread, draining `Job`s from a fresh channel and
@@ -101,6 +154,9 @@ where
 /// (which `send_outcome`'s `OwnedEnv`/`LocalPid` FFI calls require). Production
 /// code always goes through `spawn_worker`, which wires up the real
 /// `send_outcome`; only tests call this directly.
+///
+/// The `thread::Builder::spawn` call below consults `TEST_STACK_SIZE_OVERRIDE`
+/// under `#[cfg(test)]` only; see that item's doc comment for why.
 fn spawn_worker_with_sink<B, F, S>(
     make_backend: F,
     on_outcome: S,
@@ -112,8 +168,16 @@ where
 {
     let (tx, rx): (Sender<Job>, Receiver<Job>) = mpsc::channel();
 
-    let handle = thread::Builder::new()
-        .name("erlcuda-gpu-worker".into())
+    #[allow(unused_mut)]
+    let mut builder = thread::Builder::new().name("erlcuda-gpu-worker".into());
+    #[cfg(test)]
+    {
+        if let Some(size) = TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.get()) {
+            builder = builder.stack_size(size);
+        }
+    }
+
+    let handle = builder
         .spawn(move || {
             let mut backend = make_backend();
             while let Ok(first) = rx.recv() {
@@ -379,6 +443,72 @@ mod tests {
             vec![(vec![1.0], vec![10.0]), (vec![2.0], vec![20.0])]
         );
         assert_eq!(*calls_1.lock().unwrap(), vec![(vec![3.0], vec![30.0])]);
+    }
+
+    #[test]
+    fn a_panicking_spawn_for_one_device_does_not_poison_the_table_for_another() {
+        let workers: OnceLock<Mutex<HashMap<u32, Sender<Job>>>> = OnceLock::new();
+        let table = workers.get_or_init(|| Mutex::new(HashMap::new()));
+        let noop_sink = |_pid: &LocalPid, _id: u64, _result: Result<Vec<f32>, String>| {};
+
+        // Cache device 0 successfully first.
+        let calls_0 = Arc::new(Mutex::new(Vec::new()));
+        let sender_0 =
+            get_or_spawn_with_sink(table, 0, move || RecordingBackend { calls: calls_0 }, noop_sink);
+
+        // Attempt device 1 with `thread::Builder::spawn` itself forced to
+        // fail (see `TEST_STACK_SIZE_OVERRIDE`'s doc comment for why this,
+        // rather than a panicking `make_backend`, is what genuinely
+        // reproduces "a spawn-time panic under the lock"). The factory here
+        // must never actually run — if it does, thread creation didn't fail
+        // as expected, and this panic (on the worker thread, not the test
+        // thread) is a loud signal to re-check that assumption rather than
+        // silently doing nothing.
+        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(Some(usize::MAX / 2)));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            get_or_spawn_with_sink(
+                table,
+                1,
+                || -> RecordingBackend {
+                    panic!("must not run: thread creation should have failed first")
+                },
+                noop_sink,
+            )
+        }));
+        TEST_STACK_SIZE_OVERRIDE.with(|cell| cell.set(None));
+        assert!(
+            panicked.is_err(),
+            "expected the device-1 spawn to panic (thread creation should have failed)"
+        );
+
+        // Device 0's already-cached sender must still work — the table must
+        // not be poisoned by device 1's panic.
+        sender_0
+            .send(Job {
+                id: 1,
+                pid: fake_pid(),
+                a: vec![1.0],
+                b: vec![10.0],
+            })
+            .expect("device 0's worker should still be alive and receiving");
+
+        // A fresh lookup for device 0 must also still succeed (proves the
+        // mutex itself isn't poisoned, not just that the old sender clone
+        // happens to still work).
+        let sender_0_again = get_or_spawn_with_sink(
+            table,
+            0,
+            || -> RecordingBackend { panic!("must not respawn device 0, it's already cached") },
+            noop_sink,
+        );
+        sender_0_again
+            .send(Job {
+                id: 2,
+                pid: fake_pid(),
+                a: vec![2.0],
+                b: vec![20.0],
+            })
+            .expect("device 0's worker should still be alive and receiving");
     }
 
     #[test]
