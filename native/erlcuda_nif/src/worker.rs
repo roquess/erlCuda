@@ -41,7 +41,10 @@ where
 /// (which `send_outcome`'s `OwnedEnv`/`LocalPid` FFI calls require). Production
 /// code always goes through `spawn_worker`, which wires up the real
 /// `send_outcome`; only tests call this directly.
-fn spawn_worker_with_sink<B, F, S>(make_backend: F, on_outcome: S) -> (Sender<Job>, thread::JoinHandle<()>)
+fn spawn_worker_with_sink<B, F, S>(
+    make_backend: F,
+    on_outcome: S,
+) -> (Sender<Job>, thread::JoinHandle<()>)
 where
     B: Backend,
     F: FnOnce() -> B + Send + 'static,
