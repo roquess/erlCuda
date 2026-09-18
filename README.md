@@ -166,8 +166,11 @@ defmodule Example do
 end
 ```
 
-`ErlCuda.launch!/2` wraps the receive above with a timeout for the common
+`ErlCuda.launch!/3` wraps the receive above with a timeout for the common
 case; see `lib/erl_cuda.ex`.
+
+Pass `device: N` as an option to target a specific GPU (defaults to
+`device: 0`): `ErlCuda.launch(:vector_add, [a, b], device: 1)`.
 
 ## Roadmap
 
@@ -176,10 +179,15 @@ case; see `lib/erl_cuda.ex`.
 - [x] Job/result encoding between Erlang terms and device buffers (flat
       `f32` arrays).
 - [x] First kernel example (`kernels/`), `vector_add`, built with Rust-CUDA.
-- [x] Async completion via `OwnedEnv::send_and_clear`, with `ErlCuda.launch/2`
-      returning a job id and `ErlCuda.launch!/2` as a blocking convenience
+- [x] Async completion via `OwnedEnv::send_and_clear`, with `ErlCuda.launch/3`
+      returning a job id and `ErlCuda.launch!/3` as a blocking convenience
       wrapper.
-- [ ] Multi-GPU: one worker thread per device, device selection in the API.
+- [x] Multi-GPU: one worker thread and CUDA context per device
+      (`worker::sender(device)`), explicit `device:` option in
+      `ErlCuda.launch/3` and `ErlCuda.launch!/3` (default `0`). Routing to
+      independent per-device worker threads is verified with stub backends;
+      true concurrent execution across two or more physical GPUs is
+      untested on the maintainer's single-GPU machine.
 - [ ] Streams and batching for throughput once the single-kernel path works.
 - [ ] Benchmarks against a plain Rust/cudarc baseline to measure NIF/IPC
       overhead.
