@@ -9,6 +9,16 @@ const CODEGEN_NVVM_DYLIB_NAMES: [&str; 3] = [
     "librustc_codegen_nvvm.dylib",
 ];
 
+/// The Rust-CUDA commit this crate's `cust`/`cust_raw`/`cuda_builder` git
+/// dependencies are pinned to (see `Cargo.toml`'s `rev = "..."` fields).
+/// Cargo's git-checkout cache under `.cargo/git/checkouts/` is keyed by
+/// repository URL, not by revision, so a machine that has ever built
+/// `rustc_codegen_nvvm` for a *different* rev of `Rust-GPU/rust-cuda` (e.g.
+/// for an unrelated project) could otherwise have its checkout picked up
+/// here too. Each checkout's revision subdirectory is named after Cargo's
+/// abbreviated (short) commit id, so this is checked as a prefix match.
+const PINNED_RUST_CUDA_REV: &str = "6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5";
+
 fn is_codegen_nvvm_already_on_path() -> bool {
     let Some(path_var) = env::var_os("PATH") else {
         return false;
@@ -28,10 +38,11 @@ fn cargo_home() -> Option<PathBuf> {
 /// Searches `<cargo home>/git/checkouts/rust-cuda-*/*/target/release/` for an
 /// already-built `rustc_codegen_nvvm` dynamic library, from any prior manual
 /// build following this project's README instructions. Returns the
-/// directory containing it, if found. Any matching checkout is accepted, not
-/// just the exact pinned rev's own hash-prefixed directory, since what
-/// matters is the binary being from a compatible build of the same pinned
-/// commit already used elsewhere in this project.
+/// directory containing it, if found. Only a checkout of `PINNED_RUST_CUDA_REV`
+/// itself is accepted (see that constant's doc comment) — this only ever
+/// finds a build made from this project's own pinned commit, via Cargo's own
+/// git-dependency checkout mechanism (not, for example, an independently
+/// `git clone`d copy built elsewhere).
 fn find_prebuilt_codegen_nvvm_dir() -> Option<PathBuf> {
     let checkouts_dir = cargo_home()?.join("git").join("checkouts");
     for repo_entry in std::fs::read_dir(&checkouts_dir).ok()?.flatten() {
@@ -42,6 +53,10 @@ fn find_prebuilt_codegen_nvvm_dir() -> Option<PathBuf> {
             continue;
         };
         for rev_entry in rev_entries.flatten() {
+            let rev_dir_name = rev_entry.file_name();
+            if !PINNED_RUST_CUDA_REV.starts_with(rev_dir_name.to_string_lossy().as_ref()) {
+                continue;
+            }
             let release_dir = rev_entry.path().join("target").join("release");
             if CODEGEN_NVVM_DYLIB_NAMES.iter().any(|name| release_dir.join(name).is_file()) {
                 return Some(release_dir);

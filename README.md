@@ -138,17 +138,22 @@ own "build it for me" paths — so until this is scripted, it has to be built
 once by hand from the pinned Rust-CUDA checkout:
 
 ```bash
-# Locate (or clone) the Rust-CUDA checkout pinned by this repo's git
-# dependencies, at commit 6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5:
-cd <path-to-rust-cuda-checkout>
+# Locate Cargo's own checkout of the Rust-CUDA repo, fetched automatically
+# as a git dependency of this crate, at commit
+# 6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5 — normally under
+# ~/.cargo/git/checkouts/rust-cuda-*/6a836d9*/ (run `cargo build` once first
+# if it doesn't exist yet, to make Cargo fetch it):
+cd <path-to-that-checkout>
 cargo build -p rustc_codegen_nvvm --release
 ```
 
-Once built, `native/erlcuda_nif/build.rs` automatically finds it and extends
-its own `PATH` for the build — you don't need to manually export `PATH` in
-every new shell session. The one-time `cargo build -p rustc_codegen_nvvm
---release` step above is still required if you've never built it on this
-machine before.
+Once built **inside that same checkout** (not an independently `git clone`d
+copy — the auto-discovery below only looks in Cargo's own git-checkout cache,
+and only accepts a checkout of this exact pinned commit), `native/erlcuda_nif/build.rs`
+automatically finds it and extends its own `PATH` for the build — you don't
+need to manually export `PATH` in every new shell session. The one-time
+`cargo build -p rustc_codegen_nvvm --release` step above is still required if
+you've never built it on this machine before.
 
 Without that one-time build, `cargo build` in `native/erlcuda_nif/` fails to
 locate the codegen backend.
