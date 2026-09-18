@@ -119,6 +119,9 @@ impl Backend for CudaBackend {
     }
 
     fn vector_add_batch(&mut self, jobs: &[(&[f32], &[f32])]) -> Vec<Result<Vec<f32>, String>> {
+        // Every index ends up `Some`: the loop below fills invalid indices
+        // immediately, and the block after fills every remaining (valid)
+        // index either from a successful launch or a shared launch error.
         let mut results: Vec<Option<Result<Vec<f32>, String>>> = vec![None; jobs.len()];
         let mut valid_indices = Vec::new();
 
@@ -131,8 +134,9 @@ impl Backend for CudaBackend {
         }
 
         if !valid_indices.is_empty() {
-            let mut flat_a = Vec::new();
-            let mut flat_b = Vec::new();
+            let total_len: usize = valid_indices.iter().map(|&i| jobs[i].0.len()).sum();
+            let mut flat_a = Vec::with_capacity(total_len);
+            let mut flat_b = Vec::with_capacity(total_len);
             let mut offsets = Vec::with_capacity(valid_indices.len());
             for &i in &valid_indices {
                 let (a, b) = jobs[i];
