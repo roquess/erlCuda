@@ -208,7 +208,7 @@ regardless of which program it was — attributed to CUDA context
 creation/teardown handoff contention between the outgoing and incoming
 process, not to either program's own behavior.
 
-Six alternating-order trials taken for this task on this machine did **not**
+Six alternating-order trials taken in one session on this machine did **not**
 reproduce that flip. In every trial, `erlcuda_mean_us` came out higher than
 `pure_cuda_mean_us`, whether erlCuda ran first or second:
 
@@ -221,23 +221,45 @@ reproduce that flip. In every trial, `erlcuda_mean_us` came out higher than
 | 5 | pure_cuda | 336.6 | erlcuda | 373.3 |
 | 6 | erlcuda   | 376.4 | pure_cuda | 347.9 |
 
-`pure_cuda_mean_us` ranged 328.7-347.9 (median ~337.2us) regardless of
-position; `erlcuda_mean_us` ranged 369.2-383.6 (median ~372.8us) regardless
-of position, with no overlap between the two ranges across all 6 runs. That
-points to a real, order-independent full-stack overhead of roughly 35-40us
-(~10-11% of the pure-Rust baseline) for this kernel/vector size on this
-machine, rather than to the position-dependent noise described above.
+`pure_cuda_mean_us` ranged 328.7-347.9 (median ~337.2us); `erlcuda_mean_us`
+ranged 369.2-383.6 (median ~372.8us), with no overlap between the two ranges
+across those 6 runs — at the time, that looked like a real, order-independent
+full-stack overhead of roughly 35-40us (~10-11%), distinct from the
+position-dependent noise described above.
 
-Whether that specific ~35-40us gap generalizes, or whether a run on a
-different day would surface the position-dependent flip instead (both
-effects could plausibly coexist and one just didn't show up in six runs), is
-not something this quick, manual measurement can settle either way.
+**A second independent session on the same machine and the same checkout
+contradicted this in direction.** Re-running both programs 8 more times
+(4 pure_cuda-first, 4 erlcuda-first) gave:
 
-**This is a single-machine, one-shot, manually-run sample, not a tracked
-benchmark and not a general performance claim.** There's no CI job pinning
-these numbers, no fixed hardware/driver baseline, and no statistical
-confidence interval behind them — expect your own numbers, and possibly your
-own qualitative pattern, to differ.
+```
+pure_cuda: 451.3, 431.6, 438.6, 445.1, 458.3, 446.4, 449.6, 443.0   (range 431.6-458.3)
+erlcuda:   440.9, 424.5, 421.4, 419.3, 429.6, 427.6, 423.4, 429.6   (range 419.3-440.9)
+```
+
+This time `pure_cuda` read consistently *higher* than `erlcuda` by roughly
+15-20us, the opposite of the first session's finding — and both sessions'
+absolute magnitudes shifted too (420-460us here vs. 330-380us before), most
+likely from ambient GPU/driver/thermal state at the time of each session.
+
+**Taken together, the honest conclusion is that this benchmark cannot
+reliably determine even the *direction* of erlCuda's overhead at this vector
+size, let alone its magnitude.** Two separate sessions each looked internally
+consistent (tight ranges, no overlap between the two programs) while
+disagreeing with each other about which side was faster. Whatever the true
+NIF/channel overhead is at 1000 elements, it is evidently small enough to be
+dominated by session-to-session noise (GPU clock/power state, driver
+scheduling, background load) when measured this way — one-shot process
+launches with 100 in-process repetitions each. A methodology that could
+actually resolve this would need to interleave both measurements within a
+single long-lived session (or otherwise control for cross-session GPU state),
+which is out of scope for the simple manual comparison built here.
+
+**This is a single-machine sample, not a tracked benchmark and not a general
+performance claim, and — as demonstrated above — not even a stable one across
+sessions on the same machine.** There's no CI job pinning these numbers, no
+fixed hardware/driver baseline, and no statistical confidence interval behind
+them. Run the commands yourself; do not treat either session's numbers, or
+this project's, as a reliable verdict on which side is faster.
 
 ## Roadmap
 
@@ -265,14 +287,11 @@ own qualitative pattern, to differ.
 - [x] Benchmarks against a plain Rust baseline to measure NIF/IPC overhead:
       `bench_pure_cuda` (direct `CudaBackend::vector_add` call) vs.
       `bench/erlcuda_bench.exs` (full `ErlCuda.launch!/2` stack), both
-      reproducible with a single command (see Benchmarks above). Because a
-      single back-to-back pair of freshly-launched processes can in
-      principle be skewed by cross-process CUDA context handoff, the
-      section above reports six alternating-order trials rather than one
-      cherry-picked pair, together with the honest result: on the
-      maintainer's machine this run, the full stack was consistently
-      slower by roughly 35-40us regardless of run order, not just a
-      one-off snapshot.
+      reproducible with a single command (see Benchmarks above). Two
+      independent measurement sessions on the maintainer's machine
+      disagreed about which side was faster — the honest finding is that
+      this simple methodology cannot reliably pin down erlCuda's overhead
+      at this vector size, not a specific overhead number.
 
 ## Credits
 
