@@ -111,11 +111,40 @@ erlCuda/
 ## Requirements
 
 - NVIDIA GPU with a supported driver and CUDA toolkit installed.
-- Rust toolchain (stable, plus the nightly components required by
-  `rustc_codegen_nvvm` for building the `kernels/` crate).
+- Rust toolchain: stable for `native/erlcuda_nif/`, plus the nightly toolchain
+  pinned in `kernels/rust-toolchain.toml` for building the `kernels/` crate
+  (installed automatically by `rustup` the first time a command runs inside
+  `kernels/`).
 - Erlang/OTP and Elixir.
-- [Rustler](https://github.com/rusterlium/rustler) precompiled or built from
-  source for the target platform.
+- [Rustler](https://github.com/rusterlium/rustler), pulled in as a normal Mix
+  dependency.
+
+### Building `rustc_codegen_nvvm` (one-time, per machine)
+
+`native/erlcuda_nif/build.rs` compiles `kernels/` to PTX via `cuda_builder`,
+which needs the `rustc_codegen_nvvm` backend available as a dynamic library on
+`PATH`. This repo deliberately has no root Cargo workspace (`native/erlcuda_nif/`
+must stay on stable, `kernels/` on nightly), which rules out `cuda_builder`'s
+own "build it for me" paths — so until this is scripted, it has to be built
+once by hand from the pinned Rust-CUDA checkout:
+
+```bash
+# Locate (or clone) the Rust-CUDA checkout pinned by this repo's git
+# dependencies, at commit 6a836d9236fc38e0fa7a71f7bdeda7a8f82bc8d5:
+cd <path-to-rust-cuda-checkout>
+cargo build -p rustc_codegen_nvvm --release
+```
+
+Then add both of these to `PATH` before building `native/erlcuda_nif/`:
+- that checkout's `target/release/` directory (contains `rustc_codegen_nvvm`'s
+  dynamic library),
+- the CUDA toolkit's `nvvm/bin` directory (e.g.
+  `%CUDA_PATH%\nvvm\bin` on Windows, `$CUDA_PATH/nvvm/bin` on Linux).
+
+Without this, `cargo build` in `native/erlcuda_nif/` fails to locate the
+codegen backend. This is tracked as a known gap to automate (e.g. a setup
+script, or vendoring a prebuilt artifact) rather than something to repeat by
+hand indefinitely.
 
 ## Planned usage
 
