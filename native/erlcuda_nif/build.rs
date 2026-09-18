@@ -9,8 +9,9 @@ const CODEGEN_NVVM_DYLIB_NAMES: [&str; 3] = [
     "librustc_codegen_nvvm.dylib",
 ];
 
-/// The Rust-CUDA commit this crate's `cust`/`cust_raw`/`cuda_builder` git
-/// dependencies are pinned to (see `Cargo.toml`'s `rev = "..."` fields).
+/// The Rust-CUDA commit this crate's `cust`/`cuda_builder` git dependencies
+/// (and `cust`'s own transitive `cust_raw`) are pinned to (see `Cargo.toml`'s
+/// `rev = "..."` fields).
 /// Cargo's git-checkout cache under `.cargo/git/checkouts/` is keyed by
 /// repository URL, not by revision, so a machine that has ever built
 /// `rustc_codegen_nvvm` for a *different* rev of `Rust-GPU/rust-cuda` (e.g.

@@ -145,7 +145,7 @@ thread_local! {
     ///
     /// `None` (the default) leaves the builder's normal default stack size
     /// untouched, so production code and every other test are unaffected.
-    static TEST_STACK_SIZE_OVERRIDE: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    static TEST_STACK_SIZE_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// Sets `TEST_STACK_SIZE_OVERRIDE` for the lifetime of this guard, resetting
