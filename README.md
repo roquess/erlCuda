@@ -7,8 +7,9 @@ toolchain to compile Rust to PTX.
 
 Status: **early alpha**. The `vector_add` kernel runs end-to-end (Elixir ->
 Rustler NIF -> dedicated GPU worker thread -> real CUDA kernel -> async
-result), with explicit multi-GPU device selection. Streams/batching and
-benchmarks (see Roadmap below) are not implemented yet.
+result), with explicit multi-GPU device selection and opportunistic
+per-device job batching. Benchmarks (see Roadmap below) are not
+implemented yet.
 
 ## Why
 
@@ -189,7 +190,13 @@ Pass `device: N` as an option to target a specific GPU (defaults to
       independent per-device worker threads is verified with stub backends;
       true concurrent execution across two or more physical GPUs is
       untested on the maintainer's single-GPU machine.
-- [ ] Streams and batching for throughput once the single-kernel path works.
+- [x] Batching: each device's worker thread opportunistically coalesces
+      whatever jobs are already queued (up to `MAX_BATCH_SIZE = 256`) into
+      a single kernel launch via `Backend::vector_add_batch`, with zero
+      added latency for a lone in-flight job. Best-effort — not a
+      guaranteed batch size or time window. (Real CUDA streams for
+      intra-job pipelining were considered and not implemented; this item
+      covers coalescing only.)
 - [ ] Benchmarks against a plain Rust/cudarc baseline to measure NIF/IPC
       overhead.
 
