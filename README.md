@@ -52,7 +52,7 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 |  - on completion: OwnedEnv::send_and_clear(pid, {:erlcuda,     |
 |    job_id, result})                                            |
 +-------------------------------|------------------------------+
-                                | cust / cudarc host API
+                                | cust host API
                                 v
 +-------------------------------------------------------------+
 |                     GPU kernels (Rust, no_std)                |
@@ -78,7 +78,8 @@ only enqueue work on a channel and return immediately. This also means:
 - kernel launches are naturally serialized per GPU (matching how a CUDA
   context is normally driven from one thread), while multiple GPUs map to
   multiple worker threads,
-- results are delivered asynchronously via `enif_send`, following the same
+- results are delivered asynchronously via `OwnedEnv::send_and_clear`
+  (Rustler's safe wrapper around `enif_send`), following the same
   pattern used by other BEAM libraries that wrap long-running native work
   (e.g. NIF resource + message-based completion instead of a dirty NIF that
   blocks a scheduler for the whole kernel duration).
@@ -97,9 +98,11 @@ erlCuda/
 ├── native/
 │   └── erlcuda_nif/        # Rust crate, Rustler NIF + GPU worker thread
 │       ├── src/
-│       │   ├── lib.rs      # NIF entry points (load/launch/etc.)
-│       │   ├── worker.rs   # GPU worker thread, channel, CUDA context owner
-│       │   └── job.rs      # job/result encoding between BEAM terms and GPU calls
+│       │   ├── lib.rs      # NIF entry point (launch_vector_add)
+│       │   ├── worker.rs   # GPU worker thread, channel, async result delivery
+│       │   ├── backend.rs  # Backend trait, CpuBackend, CudaBackend (owns
+│       │   │               # Context/Module/Stream, launches the kernel)
+│       │   └── job.rs      # Job struct crossing the channel
 │       └── Cargo.toml
 ├── kernels/                 # Rust GPU kernels compiled to PTX
 │   ├── src/
