@@ -7,9 +7,11 @@ toolchain to compile Rust to PTX.
 
 Status: **early alpha**. The `vector_add` kernel runs end-to-end (Elixir ->
 Rustler NIF -> dedicated GPU worker thread -> real CUDA kernel -> async
-result), with explicit multi-GPU device selection and opportunistic
-per-device job batching. Benchmarks (see Roadmap below) are not
-implemented yet.
+result), with explicit multi-GPU device selection, opportunistic
+per-device job batching, and a reproducible pure-Rust-vs-full-stack latency
+benchmark (see Benchmarks below) — the initial roadmap items are all
+addressed, though several are explicitly noted below as best-effort or
+untested beyond the maintainer's own machine rather than fully hardened.
 
 ## Why
 
@@ -174,6 +176,69 @@ case; see `lib/erl_cuda.ex`.
 Pass `device: N` as an option to target a specific GPU (defaults to
 `device: 0`): `ErlCuda.launch(:vector_add, [a, b], device: 1)`.
 
+## Benchmarks
+
+Two small programs measure per-job `vector_add` latency (1000-element `f32`
+vectors, one job in flight at a time) at opposite ends of the stack:
+
+- `native/erlcuda_nif/src/bin/bench_pure_cuda.rs` calls `CudaBackend::vector_add`
+  directly, from plain Rust, with no BEAM, no NIF, and no channel involved.
+- `bench/erlcuda_bench.exs` goes through the full stack: `ErlCuda.launch!/2` ->
+  Rustler NIF -> mpsc channel -> GPU worker thread -> `OwnedEnv::send_and_clear`
+  -> `receive` in Elixir.
+
+At 1000 elements the actual GPU compute time is negligible either way, so the
+gap between the two (if any) should mostly reflect NIF/channel/BEAM-message
+overhead rather than kernel execution time.
+
+Reproduce with:
+
+```bash
+cd native/erlcuda_nif && cargo run --release --features bench --bin bench_pure_cuda
+mix run bench/erlcuda_bench.exs   # from the repo root
+```
+
+### A methodology caveat found while measuring this
+
+Both programs are correct on their own, but running them as two separate,
+freshly-launched OS processes back-to-back is not a clean way to compare
+steady-state latency: an earlier review pass reported that whichever program
+happened to run *second* in a pair tended to read noticeably higher,
+regardless of which program it was — attributed to CUDA context
+creation/teardown handoff contention between the outgoing and incoming
+process, not to either program's own behavior.
+
+Six alternating-order trials taken for this task on this machine did **not**
+reproduce that flip. In every trial, `erlcuda_mean_us` came out higher than
+`pure_cuda_mean_us`, whether erlCuda ran first or second:
+
+| trial | 1st run | 1st value (us) | 2nd run | 2nd value (us) |
+|-------|---------|-----------------|---------|-----------------|
+| 1 | pure_cuda | 328.7 | erlcuda | 369.2 |
+| 2 | erlcuda   | 383.6 | pure_cuda | 337.8 |
+| 3 | pure_cuda | 334.4 | erlcuda | 371.3 |
+| 4 | erlcuda   | 372.3 | pure_cuda | 337.7 |
+| 5 | pure_cuda | 336.6 | erlcuda | 373.3 |
+| 6 | erlcuda   | 376.4 | pure_cuda | 347.9 |
+
+`pure_cuda_mean_us` ranged 328.7-347.9 (median ~337.2us) regardless of
+position; `erlcuda_mean_us` ranged 369.2-383.6 (median ~372.8us) regardless
+of position, with no overlap between the two ranges across all 6 runs. That
+points to a real, order-independent full-stack overhead of roughly 35-40us
+(~10-11% of the pure-Rust baseline) for this kernel/vector size on this
+machine, rather than to the position-dependent noise described above.
+
+Whether that specific ~35-40us gap generalizes, or whether a run on a
+different day would surface the position-dependent flip instead (both
+effects could plausibly coexist and one just didn't show up in six runs), is
+not something this quick, manual measurement can settle either way.
+
+**This is a single-machine, one-shot, manually-run sample, not a tracked
+benchmark and not a general performance claim.** There's no CI job pinning
+these numbers, no fixed hardware/driver baseline, and no statistical
+confidence interval behind them — expect your own numbers, and possibly your
+own qualitative pattern, to differ.
+
 ## Roadmap
 
 - [x] `erlcuda_nif`: Rustler skeleton, dedicated GPU worker thread owning a
@@ -197,8 +262,17 @@ Pass `device: N` as an option to target a specific GPU (defaults to
       guaranteed batch size or time window. (Real CUDA streams for
       intra-job pipelining were considered and not implemented; this item
       covers coalescing only.)
-- [ ] Benchmarks against a plain Rust/cudarc baseline to measure NIF/IPC
-      overhead.
+- [x] Benchmarks against a plain Rust baseline to measure NIF/IPC overhead:
+      `bench_pure_cuda` (direct `CudaBackend::vector_add` call) vs.
+      `bench/erlcuda_bench.exs` (full `ErlCuda.launch!/2` stack), both
+      reproducible with a single command (see Benchmarks above). Because a
+      single back-to-back pair of freshly-launched processes can in
+      principle be skewed by cross-process CUDA context handoff, the
+      section above reports six alternating-order trials rather than one
+      cherry-picked pair, together with the honest result: on the
+      maintainer's machine this run, the full stack was consistently
+      slower by roughly 35-40us regardless of run order, not just a
+      one-off snapshot.
 
 ## Credits
 
