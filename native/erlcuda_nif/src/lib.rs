@@ -1,8 +1,9 @@
-mod atoms {
+pub(crate) mod atoms {
     rustler::atoms! {
         ok,
         error,
         invalid_device,
+        erlcuda,
     }
 }
 

@@ -9,14 +9,6 @@ use rustler::{Encoder, OwnedEnv};
 use crate::backend::{Backend, CudaBackend};
 use crate::job::Job;
 
-mod atoms {
-    rustler::atoms! {
-        erlcuda,
-        ok,
-        error,
-    }
-}
-
 /// Caps how many jobs a single batch/kernel launch can cover, bounding
 /// worst-case memory and launch-configuration size under a flood of jobs.
 /// Arbitrary but reasonable for now; not derived from a specific
@@ -259,8 +251,8 @@ fn send_outcome(pid: &LocalPid, id: u64, result: Result<Vec<f32>, String>) {
     // useful to do in that case (no BEAM-side error handler could receive it),
     // so it's discarded rather than treated as a worker failure.
     let _ = owned_env.send_and_clear(pid, |env| match result {
-        Ok(values) => (atoms::erlcuda(), id, (atoms::ok(), values)).encode(env),
-        Err(reason) => (atoms::erlcuda(), id, (atoms::error(), reason)).encode(env),
+        Ok(values) => (crate::atoms::erlcuda(), id, (crate::atoms::ok(), values)).encode(env),
+        Err(reason) => (crate::atoms::erlcuda(), id, (crate::atoms::error(), reason)).encode(env),
     });
 }
 
@@ -270,11 +262,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    type RecordedCalls = Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>>;
+
     /// A stub `Backend` that records every call it receives instead of doing
     /// any real computation, so tests can assert on call count, argument
     /// values, and call order.
     struct RecordingBackend {
-        calls: Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>>,
+        calls: RecordedCalls,
     }
 
     impl Backend for RecordingBackend {
@@ -400,8 +394,8 @@ mod tests {
         let workers: OnceLock<Mutex<HashMap<u32, Sender<Job>>>> = OnceLock::new();
         let table = workers.get_or_init(|| Mutex::new(HashMap::new()));
 
-        let calls_0: Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>> = Arc::new(Mutex::new(Vec::new()));
-        let calls_1: Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_0: RecordedCalls = Arc::new(Mutex::new(Vec::new()));
+        let calls_1: RecordedCalls = Arc::new(Mutex::new(Vec::new()));
 
         // Use a no-op outcome sink rather than the real `send_outcome`: the
         // real one calls into BEAM NIF FFI via `fake_pid()`, which is only
