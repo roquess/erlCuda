@@ -1,3 +1,11 @@
+fn check_length(a: &[f32], b: &[f32]) -> Result<(), String> {
+    if a.len() == b.len() {
+        Ok(())
+    } else {
+        Err(format!("length mismatch: {} vs {}", a.len(), b.len()))
+    }
+}
+
 pub trait Backend {
     fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String>;
 
@@ -16,9 +24,7 @@ pub struct CpuBackend;
 
 impl Backend for CpuBackend {
     fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-        if a.len() != b.len() {
-            return Err(format!("length mismatch: {} vs {}", a.len(), b.len()));
-        }
+        check_length(a, b)?;
         Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
     }
 }
@@ -45,16 +51,16 @@ pub struct CudaBackend {
 
 impl CudaBackend {
     pub fn new(device: u32) -> Result<Self, String> {
-        cust::init(CudaFlags::empty()).map_err(|e| format!("cust::init failed: {e:?}"))?;
+        cust::init(CudaFlags::empty()).map_err(|e| format!("cust::init failed: {e}"))?;
         let dev = Device::get_device(device)
-            .map_err(|e| format!("Device::get_device({device}) failed: {e:?}"))?;
-        let ctx = Context::new(dev).map_err(|e| format!("Context::new failed: {e:?}"))?;
+            .map_err(|e| format!("Device::get_device({device}) failed: {e}"))?;
+        let ctx = Context::new(dev).map_err(|e| format!("Context::new failed: {e}"))?;
         ctx.set_flags(ContextFlags::SCHED_AUTO)
-            .map_err(|e| format!("Context::set_flags failed: {e:?}"))?;
+            .map_err(|e| format!("Context::set_flags failed: {e}"))?;
         let module =
-            Module::from_ptx(PTX, &[]).map_err(|e| format!("Module::from_ptx failed: {e:?}"))?;
+            Module::from_ptx(PTX, &[]).map_err(|e| format!("Module::from_ptx failed: {e}"))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| format!("Stream::new failed: {e:?}"))?;
+            .map_err(|e| format!("Stream::new failed: {e}"))?;
         Ok(Self {
             stream,
             module,
@@ -68,21 +74,19 @@ impl CudaBackend {
     /// it assumes `a.len() == b.len()`.
     fn launch_flat(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
         let len = a.len();
-        let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e:?}"))?;
-        let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e:?}"))?;
+        let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e}"))?;
+        let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e}"))?;
         let mut out = vec![0.0f32; len];
-        let out_gpu = out
-            .as_slice()
-            .as_dbuf()
-            .map_err(|e| format!("alloc out failed: {e:?}"))?;
+        let out_gpu =
+            DeviceBuffer::<f32>::zeroed(len).map_err(|e| format!("alloc out failed: {e}"))?;
 
         let function = self
             .module
             .get_function("vector_add")
-            .map_err(|e| format!("get_function failed: {e:?}"))?;
+            .map_err(|e| format!("get_function failed: {e}"))?;
         let (_, block_size) = function
             .suggested_launch_configuration(0, 0.into())
-            .map_err(|e| format!("suggested_launch_configuration failed: {e:?}"))?;
+            .map_err(|e| format!("suggested_launch_configuration failed: {e}"))?;
         let grid_size = (len as u32).div_ceil(block_size);
 
         let stream = &self.stream;
@@ -96,15 +100,15 @@ impl CudaBackend {
                     out_gpu.as_device_ptr(),
                 )
             )
-            .map_err(|e| format!("kernel launch failed: {e:?}"))?;
+            .map_err(|e| format!("kernel launch failed: {e}"))?;
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| format!("stream.synchronize failed: {e:?}"))?;
+            .map_err(|e| format!("stream.synchronize failed: {e}"))?;
         out_gpu
             .copy_to(&mut out)
-            .map_err(|e| format!("copy_to failed: {e:?}"))?;
+            .map_err(|e| format!("copy_to failed: {e}"))?;
 
         Ok(out)
     }
@@ -126,10 +130,10 @@ impl Backend for CudaBackend {
         let mut valid_indices = Vec::new();
 
         for (i, (a, b)) in jobs.iter().enumerate() {
-            if a.len() != b.len() {
-                results[i] = Some(Err(format!("length mismatch: {} vs {}", a.len(), b.len())));
-            } else {
-                valid_indices.push(i);
+            match check_length(a, b) {
+                Err(e) => results[i] = Some(Err(e)),
+                Ok(()) if a.is_empty() => results[i] = Some(Ok(Vec::new())),
+                Ok(()) => valid_indices.push(i),
             }
         }
 
@@ -263,5 +267,23 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &vec![11.0, 22.0]);
         assert!(results[1].as_ref().unwrap_err().contains("length mismatch"));
         assert_eq!(results[2].as_ref().unwrap(), &vec![55.0]);
+    }
+
+    #[test]
+    fn cuda_backend_batch_handles_an_empty_pair() {
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
+            (vec![], vec![]),
+            (vec![1.0, 2.0], vec![10.0, 20.0]),
+        ];
+        let jobs: Vec<(&[f32], &[f32])> =
+            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+
+        let results = cuda.vector_add_batch(&jobs);
+
+        assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
+        assert_eq!(results[1].as_ref().unwrap(), &vec![11.0, 22.0]);
     }
 }
