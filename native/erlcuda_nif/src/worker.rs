@@ -266,8 +266,9 @@ mod tests {
     /// A stub `Backend` that records every `VectorAdd` call it receives
     /// instead of doing any real computation, so tests can assert on call
     /// count, argument values, and call order. Every test in this module
-    /// only ever constructs `Command::VectorAdd` jobs, so the `Reduce` arm
-    /// is unreachable in practice; it exists only to satisfy exhaustiveness.
+    /// only ever constructs `Command::VectorAdd` jobs, so the `Reduce` and
+    /// `DotProduct` arms are unreachable in practice; they exist only to
+    /// satisfy exhaustiveness.
     struct RecordingBackend {
         calls: RecordedCalls,
     }
