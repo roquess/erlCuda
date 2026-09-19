@@ -1,8 +1,6 @@
-# Elixir / Mix
+# Erlang / rebar3
 /_build/
-/deps/
 /erl_crash.dump
-*.ez
 
 # Rust
 /native/erlcuda_nif/target/
