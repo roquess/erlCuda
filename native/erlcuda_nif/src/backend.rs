@@ -8,6 +8,24 @@ fn check_length(a: &[f32], b: &[f32]) -> Result<(), String> {
     }
 }
 
+fn check_matmul_dims(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Result<(), String> {
+    if a.len() != m * k {
+        return Err(format!(
+            "matmul: `a` has {} elements, expected m*k = {}",
+            a.len(),
+            m * k
+        ));
+    }
+    if b.len() != k * n {
+        return Err(format!(
+            "matmul: `b` has {} elements, expected k*n = {}",
+            b.len(),
+            k * n
+        ));
+    }
+    Ok(())
+}
+
 pub trait Backend {
     fn run(&mut self, command: &Command) -> Result<Vec<f32>, String>;
 
@@ -37,20 +55,7 @@ impl Backend for CpuBackend {
                 Ok(vec![a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()])
             }
             Command::MatMul { a, b, m, n, k } => {
-                if a.len() != m * k {
-                    return Err(format!(
-                        "matmul: `a` has {} elements, expected m*k = {}",
-                        a.len(),
-                        m * k
-                    ));
-                }
-                if b.len() != k * n {
-                    return Err(format!(
-                        "matmul: `b` has {} elements, expected k*n = {}",
-                        b.len(),
-                        k * n
-                    ));
-                }
+                check_matmul_dims(a, b, *m, *n, *k)?;
                 let mut c = vec![0.0f32; m * n];
                 for row in 0..*m {
                     for col in 0..*n {
@@ -391,20 +396,7 @@ impl Backend for CudaBackend {
                 self.launch_dot_product(a, b).map(|v| vec![v])
             }
             Command::MatMul { a, b, m, n, k } => {
-                if a.len() != m * k {
-                    return Err(format!(
-                        "matmul: `a` has {} elements, expected m*k = {}",
-                        a.len(),
-                        m * k
-                    ));
-                }
-                if b.len() != k * n {
-                    return Err(format!(
-                        "matmul: `b` has {} elements, expected k*n = {}",
-                        b.len(),
-                        k * n
-                    ));
-                }
+                check_matmul_dims(a, b, *m, *n, *k)?;
                 self.launch_matmul(a, b, *m, *n, *k)
             }
         }
@@ -768,6 +760,35 @@ mod tests {
         let (m, n, k) = (64, 32, 48);
         let a: Vec<f32> = (0..(m * k)).map(|i| (i % 13) as f32 * 0.5).collect();
         let b: Vec<f32> = (0..(k * n)).map(|i| (i % 7) as f32 * 0.25).collect();
+        let command = Command::MatMul { a, b, m, n, k };
+
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a_val, e_val)) in actual.iter().zip(expected.iter()).enumerate() {
+            let tolerance = e_val.abs() * 1e-3 + 1e-2;
+            assert!(
+                (a_val - e_val).abs() <= tolerance,
+                "mismatch at index {i}: expected {e_val}, got {a_val}"
+            );
+        }
+    }
+
+    #[test]
+    fn cuda_backend_matmul_partial_tile_matches_cpu_backend() {
+        // Dimensions deliberately NOT multiples of MATMUL_TILE_SIZE (16), so
+        // every tile in every dimension has a partial/ragged edge that
+        // exercises the kernel's zero-padding bounds checks (row >= m,
+        // col >= n, kk+tx >= k, kk+ty >= k) — untested by the other matmul
+        // tests, which all use exact multiples of 16.
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let (m, n, k) = (20, 17, 33);
+        let a: Vec<f32> = (0..(m * k)).map(|i| (i % 11) as f32 * 0.5).collect();
+        let b: Vec<f32> = (0..(k * n)).map(|i| (i % 9) as f32 * 0.25).collect();
         let command = Command::MatMul { a, b, m, n, k };
 
         let expected = cpu.run(&command).unwrap();
