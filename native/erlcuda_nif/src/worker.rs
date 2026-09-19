@@ -38,9 +38,9 @@ pub fn sender(device: u32) -> Sender<Job> {
 /// spawn a worker thread, with only one kept in the map — the loser's
 /// `Sender` is dropped immediately without ever being cloned or handed to a
 /// caller, so its channel disconnects right away and that thread's
-/// `for job in rx` loop exits almost immediately after briefly constructing
-/// (and then dropping) its own backend. It never lingers; the cost is a
-/// moment of wasted setup, not a leaked thread.
+/// `while let Ok(first) = rx.recv()` loop exits almost immediately after
+/// briefly constructing (and then dropping) its own backend. It never
+/// lingers; the cost is a moment of wasted setup, not a leaked thread.
 fn get_or_spawn<B, F>(
     table: &Mutex<HashMap<u32, Sender<Job>>>,
     device: u32,
@@ -172,8 +172,8 @@ impl Drop for StackSizeOverrideGuard {
 
 /// Spawns the worker thread, draining `Job`s from a fresh channel and
 /// opportunistically batching whatever's already queued (via `drain_batch`)
-/// into a single `backend.vector_add_batch` call per batch, in order, feeding
-/// each outcome to `on_outcome`. The thread exits once the channel is
+/// into a single `backend.run_batch` call per batch, in order, feeding each
+/// outcome to `on_outcome`. The thread exits once the channel is
 /// disconnected (i.e. every `Sender<Job>` clone has been dropped).
 ///
 /// This is split out from `spawn_worker` so tests can inject a stub `Backend`
@@ -210,11 +210,9 @@ where
             let mut backend = make_backend();
             while let Ok(first) = rx.recv() {
                 let batch = drain_batch(&rx, first, MAX_BATCH_SIZE);
-                let inputs: Vec<(&[f32], &[f32])> = batch
-                    .iter()
-                    .map(|job| (job.a.as_slice(), job.b.as_slice()))
-                    .collect();
-                let results = backend.vector_add_batch(&inputs);
+                let commands: Vec<&crate::job::Command> =
+                    batch.iter().map(|job| &job.command).collect();
+                let results = backend.run_batch(&commands);
                 for (job, result) in batch.into_iter().zip(results) {
                     on_outcome(&job.pid, job.id, result);
                 }
@@ -259,22 +257,29 @@ fn send_outcome(pid: &LocalPid, id: u64, result: Result<Vec<f32>, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::Command;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     type RecordedCalls = Arc<Mutex<Vec<(Vec<f32>, Vec<f32>)>>>;
 
-    /// A stub `Backend` that records every call it receives instead of doing
-    /// any real computation, so tests can assert on call count, argument
-    /// values, and call order.
+    /// A stub `Backend` that records every `VectorAdd` call it receives
+    /// instead of doing any real computation, so tests can assert on call
+    /// count, argument values, and call order. Panics on any other
+    /// `Command` variant — every test in this module only ever constructs
+    /// `Command::VectorAdd` jobs.
     struct RecordingBackend {
         calls: RecordedCalls,
     }
 
     impl Backend for RecordingBackend {
-        fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-            self.calls.lock().unwrap().push((a.to_vec(), b.to_vec()));
-            Ok(vec![])
+        fn run(&mut self, command: &Command) -> Result<Vec<f32>, String> {
+            match command {
+                Command::VectorAdd { a, b } => {
+                    self.calls.lock().unwrap().push((a.clone(), b.clone()));
+                    Ok(vec![])
+                }
+            }
         }
     }
 
@@ -291,6 +296,14 @@ mod tests {
     /// `mpsc` channel outside of a NIF call.
     fn fake_pid() -> LocalPid {
         unsafe { LocalPid::from_c_arg(std::mem::zeroed()) }
+    }
+
+    fn vector_add_job(id: u64, a: Vec<f32>, b: Vec<f32>) -> Job {
+        Job {
+            id,
+            pid: fake_pid(),
+            command: Command::VectorAdd { a, b },
+        }
     }
 
     /// Joins a worker thread's handle off the test thread, failing fast
@@ -325,13 +338,8 @@ mod tests {
         );
 
         for i in 1..=5u64 {
-            tx.send(Job {
-                id: i,
-                pid: fake_pid(),
-                a: vec![i as f32],
-                b: vec![(i * 10) as f32],
-            })
-            .expect("worker thread should still be receiving");
+            tx.send(vector_add_job(i, vec![i as f32], vec![(i * 10) as f32]))
+                .expect("worker thread should still be receiving");
         }
 
         // Dropping every sender disconnects the channel, which ends the
@@ -368,13 +376,7 @@ mod tests {
             |_pid, _id, _result| {},
         );
 
-        tx.send(Job {
-            id: 1,
-            pid: fake_pid(),
-            a: vec![1.0],
-            b: vec![2.0],
-        })
-        .unwrap();
+        tx.send(vector_add_job(1, vec![1.0], vec![2.0])).unwrap();
 
         drop(tx);
         // If the loop failed to exit on channel disconnect, this would hang
@@ -423,30 +425,11 @@ mod tests {
             noop_sink,
         );
 
-        sender_0
-            .send(Job {
-                id: 1,
-                pid: fake_pid(),
-                a: vec![1.0],
-                b: vec![10.0],
-            })
-            .unwrap();
+        sender_0.send(vector_add_job(1, vec![1.0], vec![10.0])).unwrap();
         sender_0_again
-            .send(Job {
-                id: 2,
-                pid: fake_pid(),
-                a: vec![2.0],
-                b: vec![20.0],
-            })
+            .send(vector_add_job(2, vec![2.0], vec![20.0]))
             .unwrap();
-        sender_1
-            .send(Job {
-                id: 3,
-                pid: fake_pid(),
-                a: vec![3.0],
-                b: vec![30.0],
-            })
-            .unwrap();
+        sender_1.send(vector_add_job(3, vec![3.0], vec![30.0])).unwrap();
 
         drop(sender_0);
         drop(sender_0_again);
@@ -523,12 +506,7 @@ mod tests {
         // Device 0's already-cached sender must still work — the table must
         // not be poisoned by device 1's panic.
         sender_0
-            .send(Job {
-                id: 1,
-                pid: fake_pid(),
-                a: vec![1.0],
-                b: vec![10.0],
-            })
+            .send(vector_add_job(1, vec![1.0], vec![10.0]))
             .expect("device 0's worker should still be alive and receiving");
 
         // A fresh lookup for device 0 must also still succeed (proves the
@@ -541,12 +519,7 @@ mod tests {
             noop_sink,
         );
         sender_0_again
-            .send(Job {
-                id: 2,
-                pid: fake_pid(),
-                a: vec![2.0],
-                b: vec![20.0],
-            })
+            .send(vector_add_job(2, vec![2.0], vec![20.0]))
             .expect("device 0's worker should still be alive and receiving");
     }
 
@@ -554,20 +527,9 @@ mod tests {
     fn drain_batch_drains_everything_currently_queued_when_under_the_cap() {
         let (tx, rx) = mpsc::channel();
         for i in 2..=4u64 {
-            tx.send(Job {
-                id: i,
-                pid: fake_pid(),
-                a: vec![i as f32],
-                b: vec![0.0],
-            })
-            .unwrap();
+            tx.send(vector_add_job(i, vec![i as f32], vec![0.0])).unwrap();
         }
-        let first = Job {
-            id: 1,
-            pid: fake_pid(),
-            a: vec![1.0],
-            b: vec![0.0],
-        };
+        let first = vector_add_job(1, vec![1.0], vec![0.0]);
 
         let batch = drain_batch(&rx, first, 256);
 
@@ -581,13 +543,7 @@ mod tests {
     fn drain_batch_stops_at_the_cap_leaving_the_remainder_in_the_channel() {
         let (tx, rx) = mpsc::channel();
         for i in 1..=5u64 {
-            tx.send(Job {
-                id: i,
-                pid: fake_pid(),
-                a: vec![i as f32],
-                b: vec![0.0],
-            })
-            .unwrap();
+            tx.send(vector_add_job(i, vec![i as f32], vec![0.0])).unwrap();
         }
         let first = rx.recv().unwrap();
 
