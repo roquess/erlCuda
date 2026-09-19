@@ -71,4 +71,8 @@ defmodule ErlCudaTest do
     assert {:error, :invalid_device} =
              :erlcuda.launch(:vector_add, [[1.0], [1.0]], device: 99)
   end
+
+  test "launch!/3 reduces a vector via :reduce" do
+    assert ErlCuda.launch!(:reduce, [[1.0, 2.0, 3.0, 4.0]]) == [10.0]
+  end
 end

@@ -31,6 +31,7 @@ impl Backend for CpuBackend {
                 check_length(a, b)?;
                 Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
             }
+            Command::Reduce { a } => Ok(vec![a.iter().sum()]),
         }
     }
 }
@@ -54,6 +55,13 @@ pub struct CudaBackend {
     module: Module,
     _ctx: Context,
 }
+
+/// Must match `kernels/src/lib.rs`'s `REDUCE_BLOCK_SIZE` exactly — it sizes
+/// the kernel's shared-memory array at compile time, and this value picks
+/// the matching launch block size on the host. There's no way to share this
+/// constant across the two crates (the host crate never links `kernels/` as
+/// a Rust dependency, only consumes its compiled PTX via `build.rs`).
+const REDUCE_BLOCK_SIZE: u32 = 256;
 
 impl CudaBackend {
     pub fn new(device: u32) -> Result<Self, String> {
@@ -119,6 +127,47 @@ impl CudaBackend {
         Ok(out)
     }
 
+    /// Sums `a` via a block-level shared-memory tree reduction on the GPU
+    /// (one partial sum per block), then finishes the (small) remaining sum
+    /// on the host. Assumes `a` is non-empty — callers must short-circuit
+    /// the empty case themselves (a zero-block launch is not meaningful).
+    fn launch_reduce(&mut self, a: &[f32]) -> Result<f32, String> {
+        let len = a.len();
+        let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e}"))?;
+
+        let grid_size = (len as u32).div_ceil(REDUCE_BLOCK_SIZE);
+        let partial_gpu = DeviceBuffer::<f32>::zeroed(grid_size as usize)
+            .map_err(|e| format!("alloc partial_sums failed: {e}"))?;
+
+        let function = self
+            .module
+            .get_function("reduce_sum")
+            .map_err(|e| format!("get_function failed: {e}"))?;
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                function<<<grid_size, REDUCE_BLOCK_SIZE, 0, stream>>>(
+                    a_gpu.as_device_ptr(),
+                    a_gpu.len(),
+                    partial_gpu.as_device_ptr(),
+                )
+            )
+            .map_err(|e| format!("kernel launch failed: {e}"))?;
+        }
+
+        self.stream
+            .synchronize()
+            .map_err(|e| format!("stream.synchronize failed: {e}"))?;
+
+        let mut partials = vec![0.0f32; grid_size as usize];
+        partial_gpu
+            .copy_to(&mut partials)
+            .map_err(|e| format!("copy_to failed: {e}"))?;
+
+        Ok(partials.iter().sum())
+    }
+
     /// Coalesces every `VectorAdd` command in `commands` into a single
     /// kernel launch: concatenates all valid (length-matched, non-empty)
     /// pairs into one flat buffer, launches once, splits the result back by
@@ -135,6 +184,9 @@ impl CudaBackend {
             .iter()
             .map(|c| match c {
                 Command::VectorAdd { a, b } => (a.as_slice(), b.as_slice()),
+                Command::Reduce { .. } => {
+                    unreachable!("run_vector_add_batch is only ever called with VectorAdd commands")
+                }
             })
             .collect();
 
@@ -193,6 +245,12 @@ impl Backend for CudaBackend {
                 .into_iter()
                 .next()
                 .expect("run_vector_add_batch must return exactly one result per input"),
+            Command::Reduce { a } => {
+                if a.is_empty() {
+                    return Ok(vec![0.0]);
+                }
+                self.launch_reduce(a).map(|v| vec![v])
+            }
         }
     }
 
@@ -380,5 +438,65 @@ mod tests {
         let results = cuda.run_batch(&command_refs);
 
         assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
+    }
+
+    #[test]
+    fn reduces_small_vector_on_cpu() {
+        let mut backend = CpuBackend;
+        let result = backend
+            .run(&Command::Reduce {
+                a: vec![1.0, 2.0, 3.0, 4.0],
+            })
+            .unwrap();
+        assert_eq!(result, vec![10.0]);
+    }
+
+    #[test]
+    fn cuda_backend_reduce_matches_cpu_backend_small() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let command = Command::Reduce {
+            a: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        };
+
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cuda_backend_reduce_matches_cpu_backend_across_multiple_blocks() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        // Bounded, repeating values (not a huge monotonically-growing range)
+        // keep the true sum modest, so floating-point rounding differences
+        // between the CPU's sequential summation order and the GPU's
+        // tree-reduction summation order stay tiny relative to the result —
+        // exact equality is not guaranteed here, only approximate.
+        let len = 100_000;
+        let a: Vec<f32> = (0..len).map(|i| (i % 7) as f32).collect();
+        let command = Command::Reduce { a };
+
+        let expected = cpu.run(&command).unwrap()[0];
+        let actual = cuda.run(&command).unwrap()[0];
+
+        let tolerance = expected.abs() * 1e-4 + 1e-3;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected ~{expected}, got {actual} (tolerance {tolerance})"
+        );
+    }
+
+    #[test]
+    fn cuda_backend_reduce_of_empty_vector_is_zero() {
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+        let result = cuda.run(&Command::Reduce { a: vec![] }).unwrap();
+        assert_eq!(result, vec![0.0]);
     }
 }
