@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cust::device::Device;
 use cust::CudaFlags;
-use job::Job;
+use job::{Command, Job};
 use rustler::{Encoder, Env, Term};
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -30,7 +30,11 @@ fn launch_vector_add<'a>(env: Env<'a>, a: Vec<f32>, b: Vec<f32>, device: u32) ->
     let pid = env.pid();
 
     worker::sender(device)
-        .send(Job { id, pid, a, b })
+        .send(Job {
+            id,
+            pid,
+            command: Command::VectorAdd { a, b },
+        })
         .expect("erlcuda GPU worker thread is not running");
 
     (atoms::ok(), id).encode(env)
