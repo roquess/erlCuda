@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use erlcuda_nif::backend::{Backend, CudaBackend};
+use erlcuda_nif::job::Command;
 
 const VECTOR_LEN: usize = 1_000;
 const REPETITIONS: usize = 100;
@@ -11,16 +12,17 @@ fn main() {
 
     let a: Vec<f32> = (0..VECTOR_LEN).map(|i| i as f32).collect();
     let b: Vec<f32> = (0..VECTOR_LEN).map(|i| (i as f32) * 2.0).collect();
+    let command = Command::VectorAdd { a, b };
 
     // Warm-up: absorbs the one-time cost already paid by `CudaBackend::new`
     // (context creation) plus first-launch PTX module JIT-loading, neither
     // of which reflects steady-state per-job latency.
-    backend.vector_add(&a, &b).expect("warm-up vector_add failed");
+    backend.run(&command).expect("warm-up vector_add failed");
 
     let mut total = Duration::ZERO;
     for _ in 0..REPETITIONS {
         let start = Instant::now();
-        backend.vector_add(&a, &b).expect("vector_add failed");
+        backend.run(&command).expect("vector_add failed");
         total += start.elapsed();
     }
 

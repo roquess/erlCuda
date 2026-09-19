@@ -8,7 +8,7 @@ pub(crate) mod atoms {
 }
 
 pub mod backend;
-mod job;
+pub mod job;
 mod worker;
 
 use std::sync::atomic::{AtomicU64, Ordering};
