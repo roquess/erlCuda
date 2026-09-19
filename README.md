@@ -1,11 +1,11 @@
 # erlCuda
 
-GPU compute for the BEAM. `erlCuda` lets Erlang and Elixir code launch CUDA
+GPU compute for the BEAM. `erlCuda` lets Erlang code launch CUDA
 kernels written in Rust, using [Rustler](https://github.com/rusterlium/rustler)
 NIFs as the bridge and the [Rust-CUDA](https://github.com/Rust-GPU/Rust-CUDA)
 toolchain to compile Rust to PTX.
 
-Status: **early alpha**. Four kernels run end-to-end (Elixir -> Rustler NIF ->
+Status: **early alpha**. Four kernels run end-to-end (Erlang -> Rustler NIF ->
 dedicated GPU worker thread -> real CUDA kernel -> async result):
 `vector_add`, `reduce`, `dot_product`, and `matmul`. This is backed by
 explicit multi-GPU device selection, opportunistic per-device job batching,
@@ -19,7 +19,7 @@ machine rather than fully hardened.
 NVIDIA's Rust support for CUDA (via the Rust-CUDA project: `rustc_codegen_nvvm`
 + `cust`/`cudarc`) makes it possible to write GPU kernels in real Rust instead
 of hand-written CUDA C. Rustler already makes it possible to write BEAM NIFs
-in Rust. `erlCuda` connects the two, so an Elixir/Erlang application can:
+in Rust. `erlCuda` connects the two, so an Erlang application can:
 
 - write kernels in Rust, compiled to PTX for the `nvptx64-nvidia-cuda` target,
 - launch them on the GPU from a NIF,
@@ -32,10 +32,10 @@ GPU execution behave inside the BEAM's cooperative scheduling model.
 
 ```
 +-------------------------------------------------------------+
-|                      Elixir / Erlang app                    |
+|                         Erlang app                           |
 |                                                               |
-|   ErlCuda.launch(kernel, args)  ->  {:ok, job_id}            |
-|   receive do {:erlcuda, ^job_id, {:ok, result}} -> ... end    |
+|   erlcuda:launch(Kernel, Args)  ->  {ok, JobId}               |
+|   receive {erlcuda, JobId, {ok, Result}} -> ... end            |
 +-------------------------------|------------------------------+
                                 | NIF call (non-blocking)
                                 v
@@ -98,9 +98,10 @@ control over queueing, batching, and lifetime.
 
 ```
 erlCuda/
-├── lib/                    # Elixir public API (ErlCuda module)
 ├── src/
-│   └── erlcuda.erl          # idiomatic Erlang wrapper (launch/2,3, launch_sync/2,3)
+│   ├── erlcuda.erl          # public API (launch/2,3, launch_sync/2,3)
+│   ├── erlcuda_nif.erl      # NIF loader/stubs
+│   └── erlcuda.app.src      # OTP application resource file
 ├── native/
 │   └── erlcuda_nif/        # Rust crate, Rustler NIF + GPU worker thread
 │       ├── src/
@@ -116,9 +117,10 @@ erlCuda/
 │   │   └── lib.rs           # #[no_std] kernel functions
 │   └── Cargo.toml            # built with rustc_codegen_nvvm (Rust-CUDA)
 ├── test/
+│   └── erlcuda_tests.erl    # EUnit test suite
 ├── bench/
-│   └── erlcuda_bench.exs    # full-stack latency benchmark (see Benchmarks below)
-├── mix.exs
+│   └── erlcuda_bench.erl    # full-stack latency benchmark (see Benchmarks below)
+├── rebar.config
 └── LICENSE
 ```
 
@@ -129,9 +131,7 @@ erlCuda/
   pinned in `kernels/rust-toolchain.toml` for building the `kernels/` crate
   (installed automatically by `rustup` the first time a command runs inside
   `kernels/`).
-- Erlang/OTP and Elixir.
-- [Rustler](https://github.com/rusterlium/rustler), pulled in as a normal Mix
-  dependency.
+- Erlang/OTP and [rebar3](https://rebar3.org/).
 
 ### Building `rustc_codegen_nvvm` (one-time, per machine)
 
@@ -165,38 +165,37 @@ locate the codegen backend.
 
 ## Usage
 
-```elixir
-defmodule Example do
-  def run do
-    {:ok, job_id} = ErlCuda.launch(:vector_add, [a, b])
+```erlang
+-module(example).
+-export([run/0]).
 
-    receive do
-      {:erlcuda, ^job_id, {:ok, result}} -> result
-      {:erlcuda, ^job_id, {:error, reason}} -> raise "GPU kernel failed: #{inspect(reason)}"
-    end
-  end
-end
+run() ->
+    {ok, JobId} = erlcuda:launch(vector_add, [A, B]),
+    receive
+        {erlcuda, JobId, {ok, Result}} -> Result;
+        {erlcuda, JobId, {error, Reason}} -> erlang:error({gpu_kernel_failed, Reason})
+    end.
 ```
 
-`ErlCuda.launch!/3` wraps the receive above with a timeout for the common
-case; see `lib/erl_cuda.ex`.
+`erlcuda:launch_sync/3` wraps the receive above with a timeout for the
+common case; see `src/erlcuda.erl`.
 
-Pass `device: N` as an option to target a specific GPU (defaults to
-`device: 0`): `ErlCuda.launch(:vector_add, [a, b], device: 1)`.
+Pass `{device, N}` as an option to target a specific GPU (defaults to
+`{device, 0}`): `erlcuda:launch(vector_add, [A, B], [{device, 1}])`.
 
 Three more kernels are available besides `vector_add`, using the same
-`launch`/`launch!` API:
+`launch`/`launch_sync` API:
 
-```elixir
-ErlCuda.launch!(:reduce, [a])
-ErlCuda.launch!(:dot_product, [a, b])
-ErlCuda.launch!(:matmul, [a_flat, b_flat, m, n, k])
+```erlang
+erlcuda:launch_sync(reduce, [A]),
+erlcuda:launch_sync(dot_product, [A, B]),
+erlcuda:launch_sync(matmul, [AFlat, BFlat, M, N, K])
 ```
 
 `reduce` sums a single vector down to one value; `dot_product` takes two
 equal-length vectors and returns their dot product as a single value;
-`matmul` multiplies an `m x k` matrix by a `k x n` matrix (each passed
-flattened, row-major) and returns the flattened `m x n` result.
+`matmul` multiplies an `M x K` matrix by a `K x N` matrix (each passed
+flattened, row-major) and returns the flattened `M x N` result.
 
 Note on batching: the per-device worker's opportunistic batching (see
 Roadmap below) only coalesces a batch into a single kernel launch when every
@@ -215,9 +214,9 @@ vectors, one job in flight at a time) at opposite ends of the stack:
 
 - `native/erlcuda_nif/src/bin/bench_pure_cuda.rs` calls `CudaBackend::vector_add`
   directly, from plain Rust, with no BEAM, no NIF, and no channel involved.
-- `bench/erlcuda_bench.exs` goes through the full stack: `ErlCuda.launch!/2` ->
+- `bench/erlcuda_bench.erl` goes through the full stack: `erlcuda:launch_sync/2` ->
   Rustler NIF -> mpsc channel -> GPU worker thread -> `OwnedEnv::send_and_clear`
-  -> `receive` in Elixir.
+  -> `receive` in Erlang.
 
 At 1000 elements the actual GPU compute time is negligible either way, so the
 gap between the two (if any) should mostly reflect NIF/channel/BEAM-message
@@ -227,7 +226,7 @@ Reproduce with:
 
 ```bash
 cd native/erlcuda_nif && cargo run --release --features bench --bin bench_pure_cuda
-mix run bench/erlcuda_bench.exs   # from the repo root
+erl -pa _build/default/lib/erlcuda/ebin -eval "erlcuda_bench:run(), init:stop()." -noshell   # from the repo root, after `rebar3 compile`
 ```
 
 ### A methodology caveat found while measuring this
@@ -302,12 +301,12 @@ this project's, as a reliable verdict on which side is faster.
 - [x] Job/result encoding between Erlang terms and device buffers (flat
       `f32` arrays).
 - [x] First kernel example (`kernels/`), `vector_add`, built with Rust-CUDA.
-- [x] Async completion via `OwnedEnv::send_and_clear`, with `ErlCuda.launch/3`
-      returning a job id and `ErlCuda.launch!/3` as a blocking convenience
+- [x] Async completion via `OwnedEnv::send_and_clear`, with `erlcuda:launch/3`
+      returning a job id and `erlcuda:launch_sync/3` as a blocking convenience
       wrapper.
 - [x] Multi-GPU: one worker thread and CUDA context per device
       (`worker::sender(device)`), explicit `device:` option in
-      `ErlCuda.launch/3` and `ErlCuda.launch!/3` (default `0`). Routing to
+      `erlcuda:launch/3` and `erlcuda:launch_sync/3` (default `0`). Routing to
       independent per-device worker threads is verified with stub backends;
       true concurrent execution across two or more physical GPUs is
       untested on the maintainer's single-GPU machine.
@@ -320,7 +319,7 @@ this project's, as a reliable verdict on which side is faster.
       covers coalescing only.)
 - [x] Benchmarks against a plain Rust baseline to measure NIF/IPC overhead:
       `bench_pure_cuda` (direct `CudaBackend::vector_add` call) vs.
-      `bench/erlcuda_bench.exs` (full `ErlCuda.launch!/2` stack), both
+      `bench/erlcuda_bench.erl` (full `erlcuda:launch_sync/2` stack), both
       reproducible with a single command (see Benchmarks above). Two
       independent measurement sessions on the maintainer's machine
       disagreed about which side was faster — the honest finding is that
@@ -337,7 +336,7 @@ technical parts belong to them:
   (`rustc_codegen_nvvm`, `cust`, `cudarc` and related crates). `erlCuda`
   targets this ecosystem for all device-side kernel code.
 - [Rustler](https://github.com/rusterlium/rustler) — safe Rust NIFs for
-  Erlang/Elixir. `erlCuda`'s host-side bridge is built on it.
+  Erlang. `erlCuda`'s host-side bridge is built on it.
 
 ## License
 
