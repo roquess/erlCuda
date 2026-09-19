@@ -265,12 +265,9 @@ mod tests {
 
     /// A stub `Backend` that records every `VectorAdd` call it receives
     /// instead of doing any real computation, so tests can assert on call
-    /// count, argument values, and call order. `Command` only has one
-    /// variant (`VectorAdd`) today, so the match below is exhaustive; adding
-    /// another variant will make it non-exhaustive and fail to *compile*
-    /// here (not panic at runtime) until this stub is updated to handle it —
-    /// every test in this module only ever constructs `Command::VectorAdd`
-    /// jobs.
+    /// count, argument values, and call order. Every test in this module
+    /// only ever constructs `Command::VectorAdd` jobs, so the `Reduce` arm
+    /// is unreachable in practice; it exists only to satisfy exhaustiveness.
     struct RecordingBackend {
         calls: RecordedCalls,
     }
@@ -281,6 +278,9 @@ mod tests {
                 Command::VectorAdd { a, b } => {
                     self.calls.lock().unwrap().push((a.clone(), b.clone()));
                     Ok(vec![])
+                }
+                Command::Reduce { .. } => {
+                    unreachable!("RecordingBackend tests only ever construct VectorAdd jobs")
                 }
             }
         }
