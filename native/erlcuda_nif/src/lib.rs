@@ -8,14 +8,20 @@ pub(crate) mod atoms {
 }
 
 pub mod backend;
-pub mod job;
+mod job;
 mod worker;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cust::device::Device;
 use cust::CudaFlags;
-use job::{Command, Job};
+// `Job` stays crate-private (it's an internal worker-channel message type
+// carrying a `LocalPid`, not something an external consumer should build);
+// `Command` is re-exported so external `[[bin]]` targets in this same
+// package (e.g. `bin/bench_pure_cuda.rs`, which links against this crate
+// as an ordinary library) can construct commands to run through `Backend`.
+pub use job::Command;
+use job::Job;
 use rustler::{Encoder, Env, Term};
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);

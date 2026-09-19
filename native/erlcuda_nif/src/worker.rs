@@ -265,9 +265,12 @@ mod tests {
 
     /// A stub `Backend` that records every `VectorAdd` call it receives
     /// instead of doing any real computation, so tests can assert on call
-    /// count, argument values, and call order. Panics on any other
-    /// `Command` variant — every test in this module only ever constructs
-    /// `Command::VectorAdd` jobs.
+    /// count, argument values, and call order. `Command` only has one
+    /// variant (`VectorAdd`) today, so the match below is exhaustive; adding
+    /// another variant will make it non-exhaustive and fail to *compile*
+    /// here (not panic at runtime) until this stub is updated to handle it —
+    /// every test in this module only ever constructs `Command::VectorAdd`
+    /// jobs.
     struct RecordingBackend {
         calls: RecordedCalls,
     }

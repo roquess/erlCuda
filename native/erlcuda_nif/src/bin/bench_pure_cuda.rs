@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use erlcuda_nif::backend::{Backend, CudaBackend};
-use erlcuda_nif::job::Command;
+use erlcuda_nif::Command;
 
 const VECTOR_LEN: usize = 1_000;
 const REPETITIONS: usize = 100;

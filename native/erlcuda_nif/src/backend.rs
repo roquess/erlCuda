@@ -124,9 +124,12 @@ impl CudaBackend {
     /// pairs into one flat buffer, launches once, splits the result back by
     /// offset. Invalid (length-mismatched) commands get their own `Err`
     /// without touching the GPU; empty-but-valid pairs resolve to `Ok(vec![])`
-    /// directly, never reaching the flat buffer. Panics if any element of
-    /// `commands` is not `Command::VectorAdd` — callers (`run_batch` below)
-    /// must only call this once they've confirmed that.
+    /// directly, never reaching the flat buffer. `Command` only has one
+    /// variant (`VectorAdd`) today, so the match below is exhaustive; adding
+    /// another variant will make it non-exhaustive and fail to *compile*
+    /// here (not panic at runtime) until this function is updated to either
+    /// handle it or be called only with `VectorAdd` commands, same as
+    /// `run_batch` below already ensures.
     fn run_vector_add_batch(&mut self, commands: &[&Command]) -> Vec<Result<Vec<f32>, String>> {
         let pairs: Vec<(&[f32], &[f32])> = commands
             .iter()
