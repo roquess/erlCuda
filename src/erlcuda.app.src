@@ -6,5 +6,8 @@
   {env, []},
   {modules, []},
   {licenses, ["Apache-2.0"]},
-  {links, [{"GitHub", "https://github.com/roquess/erlCuda"}]}
+  {links, [{"GitHub", "https://github.com/roquess/erlCuda"}]},
+  {files, ["src", "native", "kernels", "test", "rebar.config", "rebar.lock",
+           "README.md", "CHANGELOG.md", "LICENSE"]},
+  {exclude_paths, ["native/erlcuda_nif/target", "kernels/target"]}
  ]}.
