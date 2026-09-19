@@ -32,6 +32,10 @@ impl Backend for CpuBackend {
                 Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
             }
             Command::Reduce { a } => Ok(vec![a.iter().sum()]),
+            Command::DotProduct { a, b } => {
+                check_length(a, b)?;
+                Ok(vec![a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()])
+            }
         }
     }
 }
@@ -168,6 +172,51 @@ impl CudaBackend {
         Ok(partials.iter().sum())
     }
 
+    /// Computes the dot product of `a` and `b` via the same shared-memory
+    /// tree-reduction technique as `launch_reduce`, with an elementwise
+    /// multiply folded into the per-thread value before reducing. Assumes
+    /// `a.len() == b.len()` and both are non-empty — callers must validate
+    /// length and short-circuit the empty case themselves.
+    fn launch_dot_product(&mut self, a: &[f32], b: &[f32]) -> Result<f32, String> {
+        let len = a.len();
+        let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e}"))?;
+        let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e}"))?;
+
+        let grid_size = (len as u32).div_ceil(REDUCE_BLOCK_SIZE);
+        let partial_gpu = DeviceBuffer::<f32>::zeroed(grid_size as usize)
+            .map_err(|e| format!("alloc partial_sums failed: {e}"))?;
+
+        let function = self
+            .module
+            .get_function("dot_product")
+            .map_err(|e| format!("get_function failed: {e}"))?;
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                function<<<grid_size, REDUCE_BLOCK_SIZE, 0, stream>>>(
+                    a_gpu.as_device_ptr(),
+                    a_gpu.len(),
+                    b_gpu.as_device_ptr(),
+                    b_gpu.len(),
+                    partial_gpu.as_device_ptr(),
+                )
+            )
+            .map_err(|e| format!("kernel launch failed: {e}"))?;
+        }
+
+        self.stream
+            .synchronize()
+            .map_err(|e| format!("stream.synchronize failed: {e}"))?;
+
+        let mut partials = vec![0.0f32; grid_size as usize];
+        partial_gpu
+            .copy_to(&mut partials)
+            .map_err(|e| format!("copy_to failed: {e}"))?;
+
+        Ok(partials.iter().sum())
+    }
+
     /// Coalesces every `VectorAdd` command in `commands` into a single
     /// kernel launch: concatenates all valid (length-matched, non-empty)
     /// pairs into one flat buffer, launches once, splits the result back by
@@ -184,7 +233,7 @@ impl CudaBackend {
             .iter()
             .map(|c| match c {
                 Command::VectorAdd { a, b } => (a.as_slice(), b.as_slice()),
-                Command::Reduce { .. } => {
+                Command::Reduce { .. } | Command::DotProduct { .. } => {
                     unreachable!("run_vector_add_batch is only ever called with VectorAdd commands")
                 }
             })
@@ -250,6 +299,13 @@ impl Backend for CudaBackend {
                     return Ok(vec![0.0]);
                 }
                 self.launch_reduce(a).map(|v| vec![v])
+            }
+            Command::DotProduct { a, b } => {
+                check_length(a, b)?;
+                if a.is_empty() {
+                    return Ok(vec![0.0]);
+                }
+                self.launch_dot_product(a, b).map(|v| vec![v])
             }
         }
     }
@@ -498,5 +554,50 @@ mod tests {
             CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
         let result = cuda.run(&Command::Reduce { a: vec![] }).unwrap();
         assert_eq!(result, vec![0.0]);
+    }
+
+    #[test]
+    fn dot_product_small_vectors_on_cpu() {
+        let mut backend = CpuBackend;
+        let result = backend
+            .run(&Command::DotProduct {
+                a: vec![1.0, 2.0, 3.0],
+                b: vec![4.0, 5.0, 6.0],
+            })
+            .unwrap();
+        assert_eq!(result, vec![32.0]); // 1*4 + 2*5 + 3*6
+    }
+
+    #[test]
+    fn dot_product_rejects_mismatched_lengths_on_cpu() {
+        let mut backend = CpuBackend;
+        let err = backend
+            .run(&Command::DotProduct {
+                a: vec![1.0, 2.0],
+                b: vec![1.0],
+            })
+            .unwrap_err();
+        assert!(err.contains("length mismatch"));
+    }
+
+    #[test]
+    fn cuda_backend_dot_product_matches_cpu_backend_across_multiple_blocks() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let len = 100_000;
+        let a: Vec<f32> = (0..len).map(|i| (i % 5) as f32).collect();
+        let b: Vec<f32> = (0..len).map(|i| (i % 3) as f32).collect();
+        let command = Command::DotProduct { a, b };
+
+        let expected = cpu.run(&command).unwrap()[0];
+        let actual = cuda.run(&command).unwrap()[0];
+
+        let tolerance = expected.abs() * 1e-4 + 1e-3;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected ~{expected}, got {actual} (tolerance {tolerance})"
+        );
     }
 }

@@ -75,4 +75,8 @@ defmodule ErlCudaTest do
   test "launch!/3 reduces a vector via :reduce" do
     assert ErlCuda.launch!(:reduce, [[1.0, 2.0, 3.0, 4.0]]) == [10.0]
   end
+
+  test "launch!/3 computes a dot product via :dot_product" do
+    assert ErlCuda.launch!(:dot_product, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]) == [32.0]
+  end
 end

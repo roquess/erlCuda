@@ -282,6 +282,9 @@ mod tests {
                 Command::Reduce { .. } => {
                     unreachable!("RecordingBackend tests only ever construct VectorAdd jobs")
                 }
+                Command::DotProduct { .. } => {
+                    unreachable!("RecordingBackend tests only ever construct VectorAdd jobs")
+                }
             }
         }
     }

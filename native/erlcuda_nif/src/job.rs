@@ -6,6 +6,7 @@ use rustler::types::LocalPid;
 pub enum Command {
     VectorAdd { a: Vec<f32>, b: Vec<f32> },
     Reduce { a: Vec<f32> },
+    DotProduct { a: Vec<f32>, b: Vec<f32> },
 }
 
 pub struct Job {

@@ -66,3 +66,46 @@ pub unsafe fn reduce_sum(a: &[f32], partial_sums: *mut f32) {
         }
     }
 }
+
+#[kernel]
+#[allow(improper_ctypes_definitions, clippy::missing_safety_doc)]
+pub unsafe fn dot_product(a: &[f32], b: &[f32], partial_sums: *mut f32) {
+    #[address_space(shared)]
+    static mut SDATA: [MaybeUninit<f32>; REDUCE_BLOCK_SIZE] =
+        [MaybeUninit::uninit(); REDUCE_BLOCK_SIZE];
+
+    let tid = thread::thread_idx_x() as usize;
+    let idx = thread::index_1d() as usize;
+
+    let value = if idx < a.len() { a[idx] * b[idx] } else { 0.0 };
+    unsafe {
+        SDATA[tid].write(value);
+    }
+    thread::sync_threads();
+
+    // See Task 1's `reduce_sum` for why this loop stops at `stride >= 32`
+    // and finishes the last warp serially instead of continuing to
+    // `stride > 0`: sub-warp-divergent `sync_threads()` hangs on this
+    // toolchain.
+    let mut stride = REDUCE_BLOCK_SIZE / 2;
+    while stride >= 32 {
+        if tid < stride {
+            let sum = unsafe { SDATA[tid].assume_init() + SDATA[tid + stride].assume_init() };
+            unsafe {
+                SDATA[tid].write(sum);
+            }
+        }
+        thread::sync_threads();
+        stride /= 2;
+    }
+
+    if tid == 0 {
+        let mut total = 0.0f32;
+        for i in 0..32 {
+            total += unsafe { SDATA[i].assume_init() };
+        }
+        unsafe {
+            *partial_sums.add(thread::block_idx_x() as usize) = total;
+        }
+    }
+}

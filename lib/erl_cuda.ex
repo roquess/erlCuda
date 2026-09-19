@@ -15,6 +15,7 @@ defmodule ErlCuda do
 
     * `:vector_add, [a, b]` - elementwise addition of two equal-length vectors.
     * `:reduce, [a]` - parallel sum reduction over a vector.
+    * `:dot_product, [a, b]` - dot product of two equal-length vectors.
 
   ## Options
 
@@ -30,6 +31,11 @@ defmodule ErlCuda do
   def launch(:reduce, [a], opts) do
     device = Keyword.get(opts, :device, 0)
     Native.launch_reduce(a, device)
+  end
+
+  def launch(:dot_product, [a, b], opts) do
+    device = Keyword.get(opts, :device, 0)
+    Native.launch_dot_product(a, b, device)
   end
 
   @doc """
