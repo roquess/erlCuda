@@ -16,7 +16,7 @@ launch_sync_returns_the_result_synchronously_test() ->
 
 launch_sync_raises_on_mismatched_lengths_test() ->
     ?assertError(
-        {gpu_kernel_failed, Reason},
+        {gpu_kernel_failed, _Reason},
         erlcuda:launch_sync(vector_add, [[1.0], [1.0, 2.0]])
     ),
     % Re-run just to inspect the reason via a catch, proving it actually
