@@ -5,30 +5,28 @@ defmodule ErlCuda do
 
   alias ErlCuda.Native
 
-  def launch(kernel, args, opts \\ [])
-
   @doc """
   Launches a named kernel asynchronously. Returns `{:ok, job_id}` immediately,
   or `{:error, :invalid_device}` if `opts[:device]` doesn't exist on this
   machine. The caller later receives
   `{:erlcuda, job_id, {:ok, result} | {:error, reason}}`.
 
+  ## Kernels
+
+    * `:vector_add, [a, b]` - elementwise addition of two equal-length vectors.
+    * `:reduce, [a]` - parallel sum reduction over a vector.
+
   ## Options
 
     * `:device` - GPU device ordinal to run on. Defaults to `0`.
   """
+  def launch(kernel, args, opts \\ [])
+
   def launch(:vector_add, [a, b], opts) do
     device = Keyword.get(opts, :device, 0)
     Native.launch_vector_add(a, b, device)
   end
 
-  @doc """
-  Launches a parallel sum reduction over `a`.
-
-  ## Options
-
-    * `:device` - GPU device ordinal to run on. Defaults to `0`.
-  """
   def launch(:reduce, [a], opts) do
     device = Keyword.get(opts, :device, 0)
     Native.launch_reduce(a, device)
