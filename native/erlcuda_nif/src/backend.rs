@@ -36,6 +36,33 @@ impl Backend for CpuBackend {
                 check_length(a, b)?;
                 Ok(vec![a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()])
             }
+            Command::MatMul { a, b, m, n, k } => {
+                if a.len() != m * k {
+                    return Err(format!(
+                        "matmul: `a` has {} elements, expected m*k = {}",
+                        a.len(),
+                        m * k
+                    ));
+                }
+                if b.len() != k * n {
+                    return Err(format!(
+                        "matmul: `b` has {} elements, expected k*n = {}",
+                        b.len(),
+                        k * n
+                    ));
+                }
+                let mut c = vec![0.0f32; m * n];
+                for row in 0..*m {
+                    for col in 0..*n {
+                        let mut sum = 0.0f32;
+                        for kk in 0..*k {
+                            sum += a[row * k + kk] * b[kk * n + col];
+                        }
+                        c[row * n + col] = sum;
+                    }
+                }
+                Ok(c)
+            }
         }
     }
 }
@@ -66,6 +93,11 @@ pub struct CudaBackend {
 /// constant across the two crates (the host crate never links `kernels/` as
 /// a Rust dependency, only consumes its compiled PTX via `build.rs`).
 const REDUCE_BLOCK_SIZE: u32 = 256;
+
+/// Must match `kernels/src/lib.rs`'s `MATMUL_TILE_SIZE` exactly — see
+/// `REDUCE_BLOCK_SIZE`'s comment above for why this can't be shared across
+/// crates directly.
+const MATMUL_TILE_SIZE: u32 = 16;
 
 impl CudaBackend {
     pub fn new(device: u32) -> Result<Self, String> {
@@ -217,6 +249,57 @@ impl CudaBackend {
         Ok(partials.iter().sum())
     }
 
+    /// Tiled `C = A * B` matmul. Assumes `a.len() == m*k` and `b.len() ==
+    /// k*n` — callers must validate this themselves.
+    fn launch_matmul(
+        &mut self,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, String> {
+        let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e}"))?;
+        let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e}"))?;
+        let mut c = vec![0.0f32; m * n];
+        let c_gpu = DeviceBuffer::<f32>::zeroed(m * n)
+            .map_err(|e| format!("alloc c failed: {e}"))?;
+
+        let function = self
+            .module
+            .get_function("matmul")
+            .map_err(|e| format!("get_function failed: {e}"))?;
+
+        let grid_size_x = (n as u32).div_ceil(MATMUL_TILE_SIZE);
+        let grid_size_y = (m as u32).div_ceil(MATMUL_TILE_SIZE);
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                function<<<(grid_size_x, grid_size_y), (MATMUL_TILE_SIZE, MATMUL_TILE_SIZE), 0, stream>>>(
+                    a_gpu.as_device_ptr(),
+                    a_gpu.len(),
+                    b_gpu.as_device_ptr(),
+                    b_gpu.len(),
+                    c_gpu.as_device_ptr(),
+                    m,
+                    n,
+                    k,
+                )
+            )
+            .map_err(|e| format!("kernel launch failed: {e}"))?;
+        }
+
+        self.stream
+            .synchronize()
+            .map_err(|e| format!("stream.synchronize failed: {e}"))?;
+        c_gpu
+            .copy_to(&mut c)
+            .map_err(|e| format!("copy_to failed: {e}"))?;
+
+        Ok(c)
+    }
+
     /// Coalesces every `VectorAdd` command in `commands` into a single
     /// kernel launch: concatenates all valid (length-matched, non-empty)
     /// pairs into one flat buffer, launches once, splits the result back by
@@ -233,7 +316,7 @@ impl CudaBackend {
             .iter()
             .map(|c| match c {
                 Command::VectorAdd { a, b } => (a.as_slice(), b.as_slice()),
-                Command::Reduce { .. } | Command::DotProduct { .. } => {
+                Command::Reduce { .. } | Command::DotProduct { .. } | Command::MatMul { .. } => {
                     unreachable!("run_vector_add_batch is only ever called with VectorAdd commands")
                 }
             })
@@ -306,6 +389,23 @@ impl Backend for CudaBackend {
                     return Ok(vec![0.0]);
                 }
                 self.launch_dot_product(a, b).map(|v| vec![v])
+            }
+            Command::MatMul { a, b, m, n, k } => {
+                if a.len() != m * k {
+                    return Err(format!(
+                        "matmul: `a` has {} elements, expected m*k = {}",
+                        a.len(),
+                        m * k
+                    ));
+                }
+                if b.len() != k * n {
+                    return Err(format!(
+                        "matmul: `b` has {} elements, expected k*n = {}",
+                        b.len(),
+                        k * n
+                    ));
+                }
+                self.launch_matmul(a, b, *m, *n, *k)
             }
         }
     }
@@ -599,5 +699,87 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "expected ~{expected}, got {actual} (tolerance {tolerance})"
         );
+    }
+
+    #[test]
+    fn matmul_2x2_on_cpu() {
+        let mut backend = CpuBackend;
+        // [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]]
+        let result = backend
+            .run(&Command::MatMul {
+                a: vec![1.0, 2.0, 3.0, 4.0],
+                b: vec![5.0, 6.0, 7.0, 8.0],
+                m: 2,
+                n: 2,
+                k: 2,
+            })
+            .unwrap();
+        assert_eq!(result, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn matmul_rejects_wrong_sized_a_on_cpu() {
+        let mut backend = CpuBackend;
+        let err = backend
+            .run(&Command::MatMul {
+                a: vec![1.0, 2.0, 3.0], // should be m*k = 4
+                b: vec![5.0, 6.0, 7.0, 8.0],
+                m: 2,
+                n: 2,
+                k: 2,
+            })
+            .unwrap_err();
+        assert!(err.contains("matmul"));
+    }
+
+    #[test]
+    fn cuda_backend_matmul_2x2_matches_cpu_backend() {
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let command = Command::MatMul {
+            a: vec![1.0, 2.0, 3.0, 4.0],
+            b: vec![5.0, 6.0, 7.0, 8.0],
+            m: 2,
+            n: 2,
+            k: 2,
+        };
+
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn cuda_backend_matmul_non_square_matches_cpu_backend() {
+        // m, n, k are all different from each other and larger than
+        // MATMUL_TILE_SIZE (16), so a tile boundary is actually crossed in
+        // every dimension. This is the test that specifically catches a
+        // regression back to the upstream gemm_tiled example's row/col
+        // swap bug (see the kernel's own comment in kernels/src/lib.rs):
+        // that bug only produces wrong results when m != n, which this
+        // test guarantees.
+        let mut cpu = CpuBackend;
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let (m, n, k) = (64, 32, 48);
+        let a: Vec<f32> = (0..(m * k)).map(|i| (i % 13) as f32 * 0.5).collect();
+        let b: Vec<f32> = (0..(k * n)).map(|i| (i % 7) as f32 * 0.25).collect();
+        let command = Command::MatMul { a, b, m, n, k };
+
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        for (i, (a_val, e_val)) in actual.iter().zip(expected.iter()).enumerate() {
+            let tolerance = e_val.abs() * 1e-3 + 1e-2;
+            assert!(
+                (a_val - e_val).abs() <= tolerance,
+                "mismatch at index {i}: expected {e_val}, got {a_val}"
+            );
+        }
     }
 }

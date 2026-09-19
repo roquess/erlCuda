@@ -16,6 +16,8 @@ defmodule ErlCuda do
     * `:vector_add, [a, b]` - elementwise addition of two equal-length vectors.
     * `:reduce, [a]` - parallel sum reduction over a vector.
     * `:dot_product, [a, b]` - dot product of two equal-length vectors.
+    * `:matmul, [a, b, m, n, k]` - `C = A * B` for row-major flat matrices `a`
+      (m x k) and `b` (k x n).
 
   ## Options
 
@@ -36,6 +38,11 @@ defmodule ErlCuda do
   def launch(:dot_product, [a, b], opts) do
     device = Keyword.get(opts, :device, 0)
     Native.launch_dot_product(a, b, device)
+  end
+
+  def launch(:matmul, [a, b, m, n, k], opts) do
+    device = Keyword.get(opts, :device, 0)
+    Native.launch_matmul(a, b, m, n, k, device)
   end
 
   @doc """

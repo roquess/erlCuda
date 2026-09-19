@@ -79,4 +79,11 @@ defmodule ErlCudaTest do
   test "launch!/3 computes a dot product via :dot_product" do
     assert ErlCuda.launch!(:dot_product, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]) == [32.0]
   end
+
+  test "launch!/3 multiplies matrices via :matmul" do
+    # [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]], flattened row-major
+    a = [1.0, 2.0, 3.0, 4.0]
+    b = [5.0, 6.0, 7.0, 8.0]
+    assert ErlCuda.launch!(:matmul, [a, b, 2, 2, 2]) == [19.0, 22.0, 43.0, 50.0]
+  end
 end

@@ -109,3 +109,65 @@ pub unsafe fn dot_product(a: &[f32], b: &[f32], partial_sums: *mut f32) {
         }
     }
 }
+
+pub const MATMUL_TILE_SIZE: usize = 16;
+
+#[kernel]
+#[allow(improper_ctypes_definitions, clippy::missing_safety_doc)]
+pub unsafe fn matmul(a: &[f32], b: &[f32], c: *mut f32, m: usize, n: usize, k: usize) {
+    const TILE_SIZE_2D: usize = MATMUL_TILE_SIZE * MATMUL_TILE_SIZE;
+
+    #[address_space(shared)]
+    static mut TILE_A: [MaybeUninit<f32>; TILE_SIZE_2D] = [MaybeUninit::uninit(); TILE_SIZE_2D];
+    #[address_space(shared)]
+    static mut TILE_B: [MaybeUninit<f32>; TILE_SIZE_2D] = [MaybeUninit::uninit(); TILE_SIZE_2D];
+
+    let tx = thread::thread_idx_x() as usize;
+    let ty = thread::thread_idx_y() as usize;
+
+    // row from block_idx_y(), col from block_idx_x() — matching the host
+    // launch's grid_size_y (sized by m) / grid_size_x (sized by n). The
+    // upstream gemm_tiled example this is adapted from has these swapped,
+    // which only works by coincidence for square matrices; this ordering is
+    // dimensionally correct for any m/n/k, and the non-square test below
+    // exists specifically to catch a regression back to the swapped form.
+    let row = thread::block_idx_y() as usize * MATMUL_TILE_SIZE + ty;
+    let col = thread::block_idx_x() as usize * MATMUL_TILE_SIZE + tx;
+
+    let mut sum = 0.0f32;
+    for kk in (0..k).step_by(MATMUL_TILE_SIZE) {
+        if row < m && (kk + tx) < k {
+            unsafe {
+                TILE_A[ty * MATMUL_TILE_SIZE + tx].write(a[row * k + (kk + tx)]);
+            }
+        } else {
+            unsafe {
+                TILE_A[ty * MATMUL_TILE_SIZE + tx].write(0.0f32);
+            }
+        }
+        if col < n && (kk + ty) < k {
+            unsafe {
+                TILE_B[ty * MATMUL_TILE_SIZE + tx].write(b[(kk + ty) * n + col]);
+            }
+        } else {
+            unsafe {
+                TILE_B[ty * MATMUL_TILE_SIZE + tx].write(0.0f32);
+            }
+        }
+        thread::sync_threads();
+
+        for i in 0..MATMUL_TILE_SIZE {
+            sum += unsafe {
+                TILE_A[ty * MATMUL_TILE_SIZE + i].assume_init()
+                    * TILE_B[i * MATMUL_TILE_SIZE + tx].assume_init()
+            };
+        }
+        thread::sync_threads();
+    }
+
+    if row < m && col < n {
+        unsafe {
+            *c.add(row * n + col) = sum;
+        }
+    }
+}
