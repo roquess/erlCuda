@@ -1,3 +1,5 @@
+use crate::job::Command;
+
 fn check_length(a: &[f32], b: &[f32]) -> Result<(), String> {
     if a.len() == b.len() {
         Ok(())
@@ -7,15 +9,15 @@ fn check_length(a: &[f32], b: &[f32]) -> Result<(), String> {
 }
 
 pub trait Backend {
-    fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String>;
+    fn run(&mut self, command: &Command) -> Result<Vec<f32>, String>;
 
-    /// Runs several `(a, b)` pairs and returns one result per input, in the
-    /// same order. The default implementation just loops `vector_add` — a
-    /// backend only needs to override this if it can do better than one
-    /// call per pair (e.g. `CudaBackend`, which coalesces the whole batch
-    /// into a single kernel launch).
-    fn vector_add_batch(&mut self, jobs: &[(&[f32], &[f32])]) -> Vec<Result<Vec<f32>, String>> {
-        jobs.iter().map(|(a, b)| self.vector_add(a, b)).collect()
+    /// Runs several commands and returns one result per input, in the same
+    /// order. The default implementation just loops `run` — a backend only
+    /// needs to override this if it can do better than one call per command
+    /// (e.g. `CudaBackend`, which coalesces an all-`VectorAdd` batch into a
+    /// single kernel launch).
+    fn run_batch(&mut self, commands: &[&Command]) -> Vec<Result<Vec<f32>, String>> {
+        commands.iter().map(|c| self.run(c)).collect()
     }
 }
 
@@ -23,9 +25,13 @@ pub trait Backend {
 pub struct CpuBackend;
 
 impl Backend for CpuBackend {
-    fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-        check_length(a, b)?;
-        Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
+    fn run(&mut self, command: &Command) -> Result<Vec<f32>, String> {
+        match command {
+            Command::VectorAdd { a, b } => {
+                check_length(a, b)?;
+                Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
+            }
+        }
     }
 }
 
@@ -68,11 +74,11 @@ impl CudaBackend {
         })
     }
 
-    /// Uploads `a`/`b` (already known to be the same length), launches
-    /// `vector_add` once over the whole buffer, and returns the result.
-    /// Callers are responsible for length validation before calling this —
-    /// it assumes `a.len() == b.len()`.
-    fn launch_flat(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
+    /// Uploads `a`/`b` (already known to be the same length), launches the
+    /// `vector_add` kernel once over the whole buffer, and returns the
+    /// result. Callers are responsible for length validation before calling
+    /// this — it assumes `a.len() == b.len()`.
+    fn launch_vector_add_flat(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
         let len = a.len();
         let a_gpu = a.as_dbuf().map_err(|e| format!("upload a failed: {e}"))?;
         let b_gpu = b.as_dbuf().map_err(|e| format!("upload b failed: {e}"))?;
@@ -112,24 +118,30 @@ impl CudaBackend {
 
         Ok(out)
     }
-}
 
-impl Backend for CudaBackend {
-    fn vector_add(&mut self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
-        self.vector_add_batch(&[(a, b)])
-            .into_iter()
-            .next()
-            .expect("vector_add_batch must return exactly one result per input")
-    }
+    /// Coalesces every `VectorAdd` command in `commands` into a single
+    /// kernel launch: concatenates all valid (length-matched, non-empty)
+    /// pairs into one flat buffer, launches once, splits the result back by
+    /// offset. Invalid (length-mismatched) commands get their own `Err`
+    /// without touching the GPU; empty-but-valid pairs resolve to `Ok(vec![])`
+    /// directly, never reaching the flat buffer. Panics if any element of
+    /// `commands` is not `Command::VectorAdd` — callers (`run_batch` below)
+    /// must only call this once they've confirmed that.
+    fn run_vector_add_batch(&mut self, commands: &[&Command]) -> Vec<Result<Vec<f32>, String>> {
+        let pairs: Vec<(&[f32], &[f32])> = commands
+            .iter()
+            .map(|c| match c {
+                Command::VectorAdd { a, b } => (a.as_slice(), b.as_slice()),
+            })
+            .collect();
 
-    fn vector_add_batch(&mut self, jobs: &[(&[f32], &[f32])]) -> Vec<Result<Vec<f32>, String>> {
         // Every index ends up `Some`: the loop below fills invalid indices
         // immediately, and the block after fills every remaining (valid)
         // index either from a successful launch or a shared launch error.
-        let mut results: Vec<Option<Result<Vec<f32>, String>>> = vec![None; jobs.len()];
+        let mut results: Vec<Option<Result<Vec<f32>, String>>> = vec![None; pairs.len()];
         let mut valid_indices = Vec::new();
 
-        for (i, (a, b)) in jobs.iter().enumerate() {
+        for (i, (a, b)) in pairs.iter().enumerate() {
             match check_length(a, b) {
                 Err(e) => results[i] = Some(Err(e)),
                 Ok(()) if a.is_empty() => results[i] = Some(Ok(Vec::new())),
@@ -138,18 +150,18 @@ impl Backend for CudaBackend {
         }
 
         if !valid_indices.is_empty() {
-            let total_len: usize = valid_indices.iter().map(|&i| jobs[i].0.len()).sum();
+            let total_len: usize = valid_indices.iter().map(|&i| pairs[i].0.len()).sum();
             let mut flat_a = Vec::with_capacity(total_len);
             let mut flat_b = Vec::with_capacity(total_len);
             let mut offsets = Vec::with_capacity(valid_indices.len());
             for &i in &valid_indices {
-                let (a, b) = jobs[i];
+                let (a, b) = pairs[i];
                 offsets.push((flat_a.len(), a.len()));
                 flat_a.extend_from_slice(a);
                 flat_b.extend_from_slice(b);
             }
 
-            match self.launch_flat(&flat_a, &flat_b) {
+            match self.launch_vector_add_flat(&flat_a, &flat_b) {
                 Ok(flat_out) => {
                     for (&i, &(offset, len)) in valid_indices.iter().zip(offsets.iter()) {
                         results[i] = Some(Ok(flat_out[offset..offset + len].to_vec()));
@@ -170,6 +182,31 @@ impl Backend for CudaBackend {
     }
 }
 
+impl Backend for CudaBackend {
+    fn run(&mut self, command: &Command) -> Result<Vec<f32>, String> {
+        match command {
+            Command::VectorAdd { .. } => self
+                .run_vector_add_batch(&[command])
+                .into_iter()
+                .next()
+                .expect("run_vector_add_batch must return exactly one result per input"),
+        }
+    }
+
+    fn run_batch(&mut self, commands: &[&Command]) -> Vec<Result<Vec<f32>, String>> {
+        let all_vector_add = !commands.is_empty()
+            && commands
+                .iter()
+                .all(|c| matches!(c, Command::VectorAdd { .. }));
+
+        if all_vector_add {
+            self.run_vector_add_batch(commands)
+        } else {
+            commands.iter().map(|c| self.run(c)).collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +215,10 @@ mod tests {
     fn adds_equal_length_vectors() {
         let mut backend = CpuBackend;
         let result = backend
-            .vector_add(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0])
+            .run(&Command::VectorAdd {
+                a: vec![1.0, 2.0, 3.0],
+                b: vec![10.0, 20.0, 30.0],
+            })
             .unwrap();
         assert_eq!(result, vec![11.0, 22.0, 33.0]);
     }
@@ -186,7 +226,12 @@ mod tests {
     #[test]
     fn rejects_mismatched_lengths() {
         let mut backend = CpuBackend;
-        let err = backend.vector_add(&[1.0, 2.0], &[1.0]).unwrap_err();
+        let err = backend
+            .run(&Command::VectorAdd {
+                a: vec![1.0, 2.0],
+                b: vec![1.0],
+            })
+            .unwrap_err();
         assert!(err.contains("length mismatch"));
     }
 
@@ -201,11 +246,13 @@ mod tests {
         let mut cuda =
             CudaBackend::new(0).expect("CudaBackend::new (requires an NVIDIA GPU + CUDA driver)");
 
-        let a = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let b = vec![10.0f32, 20.0, 30.0, 40.0, 50.0];
+        let command = Command::VectorAdd {
+            a: vec![1.0f32, 2.0, 3.0, 4.0, 5.0],
+            b: vec![10.0f32, 20.0, 30.0, 40.0, 50.0],
+        };
 
-        let expected = cpu.vector_add(&a, &b).unwrap();
-        let actual = cuda.vector_add(&a, &b).unwrap();
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -219,9 +266,10 @@ mod tests {
         let len = 100_000;
         let a: Vec<f32> = (0..len).map(|i| i as f32).collect();
         let b: Vec<f32> = (0..len).map(|i| (i as f32) * 2.0).collect();
+        let command = Command::VectorAdd { a, b };
 
-        let expected = cpu.vector_add(&a, &b).unwrap();
-        let actual = cuda.vector_add(&a, &b).unwrap();
+        let expected = cpu.run(&command).unwrap();
+        let actual = cuda.run(&command).unwrap();
 
         assert_eq!(actual, expected);
     }
@@ -232,19 +280,27 @@ mod tests {
         let mut cuda =
             CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
 
-        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
-            (vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]),
-            (vec![1.0], vec![100.0]),
-            (vec![5.0, 6.0, 7.0, 8.0, 9.0], vec![0.5, 0.5, 0.5, 0.5, 0.5]),
+        let commands = [
+            Command::VectorAdd {
+                a: vec![1.0, 2.0, 3.0],
+                b: vec![10.0, 20.0, 30.0],
+            },
+            Command::VectorAdd {
+                a: vec![1.0],
+                b: vec![100.0],
+            },
+            Command::VectorAdd {
+                a: vec![5.0, 6.0, 7.0, 8.0, 9.0],
+                b: vec![0.5, 0.5, 0.5, 0.5, 0.5],
+            },
         ];
-        let jobs: Vec<(&[f32], &[f32])> =
-            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+        let command_refs: Vec<&Command> = commands.iter().collect();
 
-        let results = cuda.vector_add_batch(&jobs);
-        assert_eq!(results.len(), jobs_owned.len());
+        let results = cuda.run_batch(&command_refs);
+        assert_eq!(results.len(), commands.len());
 
-        for ((a, b), result) in jobs_owned.iter().zip(results) {
-            let expected = cpu.vector_add(a, b).unwrap();
+        for (command, result) in commands.iter().zip(results) {
+            let expected = cpu.run(command).unwrap();
             assert_eq!(result.unwrap(), expected);
         }
     }
@@ -254,15 +310,23 @@ mod tests {
         let mut cuda =
             CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
 
-        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
-            (vec![1.0, 2.0], vec![10.0, 20.0]),  // valid
-            (vec![1.0, 2.0, 3.0], vec![1.0]),    // invalid: length mismatch
-            (vec![5.0], vec![50.0]),             // valid
+        let commands = [
+            Command::VectorAdd {
+                a: vec![1.0, 2.0],
+                b: vec![10.0, 20.0],
+            }, // valid
+            Command::VectorAdd {
+                a: vec![1.0, 2.0, 3.0],
+                b: vec![1.0],
+            }, // invalid: length mismatch
+            Command::VectorAdd {
+                a: vec![5.0],
+                b: vec![50.0],
+            }, // valid
         ];
-        let jobs: Vec<(&[f32], &[f32])> =
-            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+        let command_refs: Vec<&Command> = commands.iter().collect();
 
-        let results = cuda.vector_add_batch(&jobs);
+        let results = cuda.run_batch(&command_refs);
 
         assert_eq!(results[0].as_ref().unwrap(), &vec![11.0, 22.0]);
         assert!(results[1].as_ref().unwrap_err().contains("length mismatch"));
@@ -274,14 +338,19 @@ mod tests {
         let mut cuda =
             CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
 
-        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![
-            (vec![], vec![]),
-            (vec![1.0, 2.0], vec![10.0, 20.0]),
+        let commands = [
+            Command::VectorAdd {
+                a: vec![],
+                b: vec![],
+            },
+            Command::VectorAdd {
+                a: vec![1.0, 2.0],
+                b: vec![10.0, 20.0],
+            },
         ];
-        let jobs: Vec<(&[f32], &[f32])> =
-            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+        let command_refs: Vec<&Command> = commands.iter().collect();
 
-        let results = cuda.vector_add_batch(&jobs);
+        let results = cuda.run_batch(&command_refs);
 
         assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
         assert_eq!(results[1].as_ref().unwrap(), &vec![11.0, 22.0]);
@@ -292,18 +361,20 @@ mod tests {
         // Unlike `cuda_backend_batch_handles_an_empty_pair` (where a
         // non-empty job in the same batch keeps the concatenated flat
         // buffer non-empty regardless), this batch has no non-empty job at
-        // all: `valid_indices` ends up empty, so the flat-buffer/launch_flat
-        // path must never run. Before the empty-vector fix, a batch shaped
-        // like this reached `launch_flat` with a zero-length buffer and
-        // failed with `InvalidValue`.
+        // all: `valid_indices` ends up empty, so the flat-buffer/launch path
+        // must never run. Before the empty-vector fix (an earlier task),
+        // a batch shaped like this reached the GPU launch with a
+        // zero-length buffer and failed with `InvalidValue`.
         let mut cuda =
             CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
 
-        let jobs_owned: Vec<(Vec<f32>, Vec<f32>)> = vec![(vec![], vec![])];
-        let jobs: Vec<(&[f32], &[f32])> =
-            jobs_owned.iter().map(|(a, b)| (a.as_slice(), b.as_slice())).collect();
+        let commands = [Command::VectorAdd {
+            a: vec![],
+            b: vec![],
+        }];
+        let command_refs: Vec<&Command> = commands.iter().collect();
 
-        let results = cuda.vector_add_batch(&jobs);
+        let results = cuda.run_batch(&command_refs);
 
         assert_eq!(results[0].as_ref().unwrap(), &Vec::<f32>::new());
     }
