@@ -589,6 +589,35 @@ mod tests {
     }
 
     #[test]
+    fn cuda_backend_run_batch_with_mixed_types_falls_back_to_per_command_dispatch() {
+        // Directly exercises CudaBackend::run_batch's own all_vector_add gate
+        // with a genuinely mixed-type slice (not just worker.rs's stub-level
+        // dispatch test, which never reaches this gate since RecordingBackend
+        // et al. only ever get the trait's default run_batch). A regression
+        // that broke the gate (e.g. treating this batch as all-VectorAdd and
+        // corrupting results) would fail this test's assertions.
+        let mut cuda =
+            CudaBackend::new(0).expect("CudaBackend::new(0) (requires an NVIDIA GPU + CUDA driver)");
+
+        let commands = [
+            Command::VectorAdd {
+                a: vec![1.0, 2.0],
+                b: vec![10.0, 20.0],
+            },
+            Command::Reduce {
+                a: vec![1.0, 2.0, 3.0],
+            },
+        ];
+        let command_refs: Vec<&Command> = commands.iter().collect();
+
+        let results = cuda.run_batch(&command_refs);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap(), &vec![11.0, 22.0]);
+        assert_eq!(results[1].as_ref().unwrap(), &vec![6.0]);
+    }
+
+    #[test]
     fn reduces_small_vector_on_cpu() {
         let mut backend = CpuBackend;
         let result = backend
