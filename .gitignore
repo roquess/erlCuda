@@ -1,6 +1,7 @@
 # Erlang / rebar3
 /_build/
 /erl_crash.dump
+/doc/
 
 # Rust
 /native/erlcuda_nif/target/
