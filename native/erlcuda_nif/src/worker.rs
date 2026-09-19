@@ -562,4 +562,76 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec![4, 5]);
     }
+
+    #[test]
+    fn a_batch_mixing_vector_add_and_reduce_still_returns_correct_per_job_results() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        // A stub distinguishing VectorAdd from any other Command by simply
+        // running the same math a real Backend would, recording which kind
+        // of command it saw, so this test can prove run_batch's fallback
+        // path (triggered by a non-uniform batch) still dispatches each job
+        // to the correct logic rather than, say, treating everything as
+        // VectorAdd.
+        struct MixedBackend {
+            calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl Backend for MixedBackend {
+            fn run(&mut self, command: &Command) -> Result<Vec<f32>, String> {
+                match command {
+                    Command::VectorAdd { a, b } => {
+                        self.calls.lock().unwrap().push("vector_add");
+                        Ok(a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
+                    }
+                    Command::Reduce { a } => {
+                        self.calls.lock().unwrap().push("reduce");
+                        Ok(vec![a.iter().sum()])
+                    }
+                    _ => panic!("this test only constructs VectorAdd and Reduce jobs"),
+                }
+            }
+        }
+
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let outcomes_for_sink = Arc::clone(&outcomes);
+
+        let (tx, handle) = spawn_worker_with_sink(
+            move || MixedBackend { calls },
+            move |_pid, id, result| {
+                outcomes_for_sink.lock().unwrap().push((id, result));
+            },
+        );
+
+        // Send both before the worker's first recv can plausibly drain
+        // them separately, so they land in the same drained batch (best
+        // effort — see drain_batch's own tests for the deterministic,
+        // non-timing-dependent version of this guarantee).
+        tx.send(Job {
+            id: 1,
+            pid: fake_pid(),
+            command: Command::VectorAdd {
+                a: vec![1.0, 2.0],
+                b: vec![10.0, 20.0],
+            },
+        })
+        .unwrap();
+        tx.send(Job {
+            id: 2,
+            pid: fake_pid(),
+            command: Command::Reduce {
+                a: vec![1.0, 2.0, 3.0],
+            },
+        })
+        .unwrap();
+
+        drop(tx);
+        join_within(handle, Duration::from_secs(5));
+
+        let outcomes = outcomes.lock().unwrap();
+        let outcome_1 = outcomes.iter().find(|(id, _)| *id == 1).unwrap();
+        let outcome_2 = outcomes.iter().find(|(id, _)| *id == 2).unwrap();
+
+        assert_eq!(outcome_1.1, Ok(vec![11.0, 22.0]));
+        assert_eq!(outcome_2.1, Ok(vec![6.0]));
+    }
 }

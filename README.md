@@ -5,13 +5,14 @@ kernels written in Rust, using [Rustler](https://github.com/rusterlium/rustler)
 NIFs as the bridge and the [Rust-CUDA](https://github.com/Rust-GPU/Rust-CUDA)
 toolchain to compile Rust to PTX.
 
-Status: **early alpha**. The `vector_add` kernel runs end-to-end (Elixir ->
-Rustler NIF -> dedicated GPU worker thread -> real CUDA kernel -> async
-result), with explicit multi-GPU device selection, opportunistic
-per-device job batching, and a reproducible pure-Rust-vs-full-stack latency
-benchmark (see Benchmarks below) — the initial roadmap items are all
-addressed, though several are explicitly noted below as best-effort or
-untested beyond the maintainer's own machine rather than fully hardened.
+Status: **early alpha**. Four kernels run end-to-end (Elixir -> Rustler NIF ->
+dedicated GPU worker thread -> real CUDA kernel -> async result):
+`vector_add`, `reduce`, `dot_product`, and `matmul`. This is backed by
+explicit multi-GPU device selection, opportunistic per-device job batching,
+and a reproducible pure-Rust-vs-full-stack latency benchmark (see Benchmarks
+below) — the initial roadmap items are all addressed, though several are
+explicitly noted below as best-effort or untested beyond the maintainer's own
+machine rather than fully hardened.
 
 ## Why
 
@@ -103,7 +104,8 @@ erlCuda/
 ├── native/
 │   └── erlcuda_nif/        # Rust crate, Rustler NIF + GPU worker thread
 │       ├── src/
-│       │   ├── lib.rs      # NIF entry point (launch_vector_add)
+│       │   ├── lib.rs      # NIF entry points (launch_vector_add, launch_reduce,
+│       │   │               # launch_dot_product, launch_matmul)
 │       │   ├── worker.rs   # GPU worker thread, channel, async result delivery
 │       │   ├── backend.rs  # Backend trait, CpuBackend, CudaBackend (owns
 │       │   │               # Context/Module/Stream, launches the kernel)
@@ -181,6 +183,30 @@ case; see `lib/erl_cuda.ex`.
 
 Pass `device: N` as an option to target a specific GPU (defaults to
 `device: 0`): `ErlCuda.launch(:vector_add, [a, b], device: 1)`.
+
+Three more kernels are available besides `vector_add`, using the same
+`launch`/`launch!` API:
+
+```elixir
+ErlCuda.launch!(:reduce, [a])
+ErlCuda.launch!(:dot_product, [a, b])
+ErlCuda.launch!(:matmul, [a_flat, b_flat, m, n, k])
+```
+
+`reduce` sums a single vector down to one value; `dot_product` takes two
+equal-length vectors and returns their dot product as a single value;
+`matmul` multiplies an `m x k` matrix by a `k x n` matrix (each passed
+flattened, row-major) and returns the flattened `m x n` result.
+
+Note on batching: the per-device worker's opportunistic batching (see
+Roadmap below) only coalesces a batch into a single kernel launch when every
+job in it is `vector_add` targeting the same device. If a drained batch
+contains any `reduce`, `dot_product`, or `matmul` job — or a mix of kernel
+types — the worker falls back to running each job in that batch one at a
+time, in order, still returning the correct per-job result for each. This
+was already true architecturally before `reduce`/`dot_product`/`matmul`
+existed; it's called out here now that there's more than one non-`vector_add`
+kernel to wonder about.
 
 ## Benchmarks
 
