@@ -222,7 +222,8 @@ At 1000 elements the actual GPU compute time is negligible either way, so the
 gap between the two (if any) should mostly reflect NIF/channel/BEAM-message
 overhead rather than kernel execution time.
 
-Reproduce with:
+Reproduce with (requires a git clone — `bench/` is dev tooling and isn't
+shipped in the hex.pm package):
 
 ```bash
 cd native/erlcuda_nif && cargo run --release --features bench --bin bench_pure_cuda
