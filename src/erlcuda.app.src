@@ -9,5 +9,6 @@
   {links, [{"GitHub", "https://github.com/roquess/erlCuda"}]},
   {files, ["src", "native", "kernels", "test", "rebar.config", "rebar.lock",
            "README.md", "CHANGELOG.md", "LICENSE"]},
-  {exclude_paths, ["native/erlcuda_nif/target", "kernels/target"]}
+  {exclude_paths, ["native/erlcuda_nif/target", "kernels/target",
+                   "native/erlcuda_nif/.wolf", "kernels/.wolf"]}
  ]}.
