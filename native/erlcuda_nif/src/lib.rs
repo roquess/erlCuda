@@ -134,4 +134,4 @@ fn validate_device(device: u32) -> Result<(), rustler::Atom> {
     }
 }
 
-rustler::init!("Elixir.ErlCuda.Native");
+rustler::init!("erlcuda_nif");
